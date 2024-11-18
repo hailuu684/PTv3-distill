@@ -8,16 +8,8 @@ from pointcept.utils import comm
 
 
 class PTv3_Dataloader():
-    def __init__(self, cfg_path):
-        # get configuration
-        self.cfg = default_config_parser(cfg_path, None)
-        # print(cfg)
-        
-        # Set up config
-        self.cfg = default_setup(self.cfg)
-        # print(cfg)
-        
-        # trainer = TRAINERS.build(dict(type=cfg.train.type, cfg=cfg))
+    def __init__(self, cfg):
+        self.cfg = cfg
         
         # create training data loader
         self.init_fn = (

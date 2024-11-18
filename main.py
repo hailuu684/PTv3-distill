@@ -1,21 +1,21 @@
-import math
 import torch
-import torch.nn as nn
-# from point_cloud_dataset import dummy_data, preprocessing
-from torch.utils.data import Dataset, DataLoader
 from dataloader import PTv3_Dataloader
-from pointcept.utils.registry import Registry
-from datasets import load_dataset
 from PTv3_model import PointTransformerV3, load_weights_ptv3_nucscenes_seg
-import pickle
+from pointcept.engines.defaults import default_config_parser, default_setup
+from pointcept.models.losses import build_criteria
 import os
 
-from pointcept.engines.train import TRAINERS
-
-PRETRAINED_PATH = '/media/anda/hdd1/thomas/PTv3-distill/huggingface_model/PointTransformerV3/nuscenes-semseg-pt-v3m1-0-base/model/model_best.pth'
+# Pretrained model path and config file
+PRETRAINED_PATH = '/home/thomle/PTv3-distill/huggingface_model/PointTransformerV3/nuscenes-semseg-pt-v3m1-0-base/model/model_best.pth'
 CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-base.py"
 
+
 def main():
+    # Load configuration
+    cfg = default_config_parser(CONFIG_FILE, None)
+    cfg = default_setup(cfg)
+
+    # Load the model
     model = PointTransformerV3(
         in_channels=4,
         pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo"),
@@ -47,36 +47,93 @@ def main():
         pdnorm_decouple=True,
         pdnorm_adaptive=False,
         pdnorm_affine=True
-        )
+    )
 
     # Load pretrained weights
-    pretrained_model = load_weights_ptv3_nucscenes_seg(model, PRETRAINED_PATH)
-    
-    loader = PTv3_Dataloader(CONFIG_FILE)
-    train_loader = loader.load_training_data()
-    
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    pretrained_model = pretrained_model.to(device)
-    
-    # Training loop
-    pretrained_model.train()
-    for batch_ndx, sample in enumerate(train_loader):
-        print(sample["segment"].shape)
-        
-        # Move data to device
-        sample = {k: v.to(device) for k, v in sample.items()}
-        
-        # Forward pass
-        outputs = pretrained_model.forward(sample)
-        print(outputs.keys())
-        
-        # Backward pass and optimization
-        
-        # ................
-        break
-    
+    load_weights_ptv3_nucscenes_seg(model, PRETRAINED_PATH)
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
+    # Data load
+    loader = PTv3_Dataloader(cfg)
+    train_loader = loader.load_training_data()
+
+    # Move model to device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+
+    # Loss setup
+    criteria = build_criteria(cfg.model.criteria)
+
+    # Define optimizer with parameter groups (if needed)
+    # if hasattr(model, "backbone") and hasattr(model, "head"):
+    #     optimizer = torch.optim.AdamW([
+    #         {"params": model.backbone.parameters(), "lr": 0.0002},
+    #         {"params": model.head.parameters(), "lr": 0.002},
+    #     ], weight_decay=cfg.optimizer.weight_decay)
+    #     max_lr = cfg.scheduler.max_lr  # List of max_lr values for parameter groups
+    # else:
+    #     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
+    #     max_lr = cfg.scheduler.max_lr[0]  # Single value for max_lr
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
+    max_lr = cfg.scheduler.max_lr[0]  # Single value for max_lr
+
+    # Scheduler setup
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=max_lr,
+        pct_start=cfg.scheduler.pct_start,
+        anneal_strategy=cfg.scheduler.anneal_strategy,
+        div_factor=cfg.scheduler.div_factor,
+        final_div_factor=cfg.scheduler.final_div_factor,
+        total_steps=len(train_loader) * cfg.epoch,
+    )
+
+    # Training loop
+    model.train()
+    num_epochs = cfg.epoch
+
+    for epoch in range(num_epochs):
+        running_loss = 0.0
+        for batch_ndx, input_dict in enumerate(train_loader):
+            # Move input data to device
+            input_dict = {k: v.to(device) for k, v in input_dict.items()}
+
+            # Forward pass
+            seg_logits = model(input_dict)
+
+            # Extract the logits tensor for loss calculation
+            # if isinstance(seg_logits, dict) or hasattr(seg_logits, 'keys'):
+            #     logits_tensor = seg_logits.get("feat", None)  # Use the "feat" key
+            #     if logits_tensor is None:
+            #         raise KeyError("The key 'feat' is not present in seg_logits. Check your model's output structure.")
+            # elif isinstance(seg_logits, torch.Tensor):  # If it's already a tensor
+            #     logits_tensor = seg_logits
+            # else:
+            #     raise TypeError(f"Unexpected type for seg_logits: {type(seg_logits)}. Expected dict-like or torch.Tensor.")
+
+            logits_tensor = seg_logits.get("feat", None)
+
+            # Compute loss
+            loss = criteria(logits_tensor, input_dict["segment"])
+
+            # Backward pass
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            # Accumulate loss
+            running_loss += loss.item()
+
+            # Print progress every 10 batches
+            if batch_ndx % 10 == 0:
+                print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_ndx}/{len(train_loader)}], Loss: {loss.item():.4f}")
+
+        # Step the scheduler
+        scheduler.step()
+
+        # Print epoch loss
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {running_loss / len(train_loader):.4f}")
+
+
+if __name__ == "__main__":
     main()
-    
