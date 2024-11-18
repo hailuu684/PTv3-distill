@@ -550,6 +550,9 @@ class PointTransformerV3(PointModule):
         pdnorm_adaptive=False,
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
+        context_channels=256,
+        backbone_out_channels=96,
+        num_classes=16
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -592,6 +595,10 @@ class PointTransformerV3(PointModule):
             ln_layer = nn.LayerNorm
         # activation layers
         act_layer = nn.GELU
+
+        self.conditions = pdnorm_conditions
+        self.embedding_table = nn.Embedding(len(pdnorm_conditions), context_channels)
+        self.seg_head = nn.Linear(backbone_out_channels, num_classes)
 
         self.embedding = Embedding(
             in_channels=in_channels,
@@ -712,7 +719,9 @@ class PointTransformerV3(PointModule):
                 indptr=nn.functional.pad(point.offset, (1, 0)),
                 reduce="mean",
             )
-        return point
+
+        seg_logits = self.seg_head(point.feat)
+        return seg_logits
 
 
 def load_weights_ptv3_nucscenes_seg(model, weight_path):
@@ -725,7 +734,7 @@ def load_weights_ptv3_nucscenes_seg(model, weight_path):
 
     #todo: seg_head cannot be loaded
     print("WARNING!!! Seg head cannot be loaded from pretrained weights")
-    model.load_state_dict(adjusted_state_dict, strict=False)
+    model.load_state_dict(adjusted_state_dict, strict=True)
     # model.load_state_dict(checkpoint['state_dict'], strict=True)
 
     print("loaded weights from epoch: ", checkpoint["epoch"])

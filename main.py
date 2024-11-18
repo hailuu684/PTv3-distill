@@ -4,40 +4,15 @@ import torch.nn as nn
 # from point_cloud_dataset import dummy_data, preprocessing
 from torch.utils.data import Dataset, DataLoader
 from PTv3_model import PointTransformerV3, load_weights_ptv3_nucscenes_seg
-import os
+from datasets import load_dataset
 
 
 def main():
-    # Create the dataset and DataLoader
+    # dataset = load_dataset("Pointcept/s3dis-compressed",
+    #                        cache_dir="/home/luu/projects/PTv3-distill/point_cloud_dataset/s3dis",
+    #                        split="train",
+    #                        download_mode="force_redownload")
 
-    # # Initialize NuScenes instance and create a DataLoader
-    # nusc = preprocessing.mini_nuscenes.NuScenes(version='v1.0-mini',
-    #                                             dataroot='/home/luu/projects/distill_ptv3/point_cloud_dataset/mini_nuscenes',
-    #                                             verbose=True)
-    #
-    # preprocessed_data_path = '/home/luu/projects/PTv3-distill/point_cloud_dataset' \
-    #                          '/mini_nuscenes/preprocess_data/point_cloud_data.pkl'
-    # if not os.path.exists(preprocessed_data_path):
-    #
-    #     save_preprocess_path = '/home/luu/projects/PTv3-distill/point_cloud_dataset/mini_nuscenes'
-    #
-    #     preprocessing.preprocess_point_cloud(nusc=nusc, out_dir=save_preprocess_path)
-    #
-    # # Create the dataset and DataLoader
-    # nuscenes_dataset = preprocessing.mini_nuscenes.PreprocessedNuScenesDataset(preprocessed_data_path=preprocessed_data_path,
-    #                                                                            use_augmentation=False)
-    #
-    # print(nuscenes_dataset[0])
-    # mini_nuscene_dataloader = DataLoader(nuscenes_dataset, batch_size=4, shuffle=True, num_workers=4,
-    #                                      collate_fn=None)
-    #
-    # # Iterate through the dataset
-    # for i, (point_cloud, annotations) in enumerate(mini_nuscene_dataloader):
-    #     print(f"Batch {i}:")
-    #     print(f"Point Cloud Shape: {point_cloud.shape}")
-    #     print(f"Annotations: {annotations}")
-    #     break
-    #
     model = PointTransformerV3(in_channels=4, pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo"),
                                cls_mode=False, pdnorm_bn=False, mlp_ratio=4, qkv_bias=True,
                                enable_flash=False, order=['z', 'z-trans', 'hilbert', 'hilbert-trans'],
@@ -55,30 +30,40 @@ def main():
 
     pretrained_model = load_weights_ptv3_nucscenes_seg(model, pretrained_path)
 
-    # # Define a loss function and optimizer
-    # criterion = torch.nn.CrossEntropyLoss()
-    # optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    #
-    # # Training loop
-    # for epoch in range(10):  # Example of 10 epochs
-    #     for batch_idx, (data_dict, labels) in enumerate(mini_nuscene_dataloader):
-    #         optimizer.zero_grad()
-    #
-    #         # Forward pass
-    #         outputs = model(data_dict)  # Passing data_dict through the model
-    #
-    #         # Calculate loss
-    #         loss = criterion(outputs, labels)
-    #
-    #         print(outputs)
-    #
-    #         print(loss)
-    #
-    #         break
+
+def fix_specific_line(file_path, line_number, old_text, new_text):
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as file:
+        lines = file.readlines()
+
+    # Check if the line number is valid
+    if line_number < len(lines):
+        # Replace old_text with new_text in the specified line
+        lines[line_number] = lines[line_number].replace(old_text, new_text)
+
+    # Write the corrected lines back to the file
+    with open(file_path, 'w', encoding='utf-8') as file:
+        file.writelines(lines)
+
+    print('done')
+
+
+def preprocessed_s3dis():
+    output_root = '/home/luu/projects/PTv3-distill/point_cloud_dataset/s3dis/preprocessed'
+    dataset_root = '/home/luu/projects/PTv3-distill/point_cloud_dataset/s3dis/Stanford3dDataset_v1.2'
+
+    "python3 pointcept/datasets/preprocessing/s3dis/ preprocess_s3dis.py " \
+    "--dataset_root /home/luu/projects/PTv3-distill/point_cloud_dataset/s3dis/Stanford3dDataset_v1.2 " \
+    "--output_root /home/luu/projects/PTv3-distill/point_cloud_dataset/s3dis/preprocessed"
 
 
 # Press the green button in the gutter to run the script.
 if __name__ == '__main__':
     main()
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+    # # Usage
+    # file_path = '/home/luu/projects/PTv3-distill/point_cloud_dataset/s3dis/Stanford3dDataset_v1.2/Area_5/office_19/Annotations/ceiling'
+    # line_number = 323473  # Index is zero-based, so 323474 in human terms is 323473 in Python
+    # old_text = "103.0�0000"
+    # new_text = "103.000000"
+
+    # fix_specific_line(file_path, line_number, old_text, new_text)
