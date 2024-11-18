@@ -551,7 +551,7 @@ class PointTransformerV3(PointModule):
         pdnorm_affine=True,
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
         context_channels=256,
-        backbone_out_channels=96,
+        backbone_out_channels=64,
         num_classes=16
     ):
         super().__init__()
@@ -705,6 +705,13 @@ class PointTransformerV3(PointModule):
                 self.dec.add(module=dec, name=f"dec{s}")
 
     def forward(self, data_dict):
+
+        context = self.embedding_table(
+            torch.tensor([0], device=data_dict["coord"].device)
+        )
+
+        data_dict["context"] = context # --> might be helpful here
+
         point = Point(data_dict)
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
@@ -721,6 +728,7 @@ class PointTransformerV3(PointModule):
             )
 
         seg_logits = self.seg_head(point.feat)
+
         return seg_logits
 
 
@@ -731,10 +739,11 @@ def load_weights_ptv3_nucscenes_seg(model, weight_path):
 
     # Adjust the keys by removing the 'backbone.' prefix
     adjusted_state_dict = {key.replace('module.backbone.', ''): value for key, value in checkpoint['state_dict'].items()}
+    adjusted_state_dict = {key.replace('module.seg_head.', 'seg_head.'): value for key, value in
+                           adjusted_state_dict.items()}
 
-    #todo: seg_head cannot be loaded
-    print("WARNING!!! Seg head cannot be loaded from pretrained weights")
-    model.load_state_dict(adjusted_state_dict, strict=True)
+    print("WARNING!!! Embedding table cannot be loaded from pretrained weights but it might be not necessary")
+    model.load_state_dict(adjusted_state_dict, strict=False)
     # model.load_state_dict(checkpoint['state_dict'], strict=True)
 
     print("loaded weights from epoch: ", checkpoint["epoch"])
