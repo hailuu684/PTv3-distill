@@ -135,5 +135,43 @@ def main():
         print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {running_loss / len(train_loader):.4f}")
 
 
+def student_models():
+
+    student_model = PointTransformerV3(
+        in_channels=4,
+        pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo"),
+        cls_mode=False,
+        pdnorm_bn=False,
+        mlp_ratio=2,  # Reduced from 4 to 2
+        qkv_bias=True,
+        enable_flash=False,
+        order=['z', 'z-trans', 'hilbert', 'hilbert-trans'],
+        stride=(2, 2, 2, 2),
+        enc_depths=(1, 1, 1, 3, 1),  # Reduced depth from (2, 2, 2, 6, 2)
+        enc_channels=(16, 32, 64, 128, 256),  # Reduced number of channels
+        enc_num_head=(1, 2, 4, 8, 16),  # Reduced number of attention heads
+        enc_patch_size=(512, 512, 512, 512, 512),  # Smaller patch sizes
+        dec_depths=(1, 1, 1, 1),  # Reduced decoder depth
+        dec_channels=(32, 32, 64, 128),  # Reduced decoder channels
+        dec_num_head=(2, 2, 4, 8),  # Reduced decoder attention heads
+        dec_patch_size=(512, 512, 512, 512),  # Smaller patch sizes
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        drop_path=0.1,  # Reduced drop path rate
+        shuffle_orders=True,
+        pre_norm=True,
+        enable_rpe=False,
+        upcast_attention=False,
+        upcast_softmax=False,
+        pdnorm_ln=False,
+        pdnorm_decouple=True,
+        pdnorm_adaptive=False,
+        pdnorm_affine=True
+    )
+
+    return student_model
+
+
 if __name__ == "__main__":
     main()
