@@ -746,6 +746,7 @@ def load_weights_ptv3_nucscenes_seg(model, weight_path):
     model.load_state_dict(adjusted_state_dict, strict=False)
     # model.load_state_dict(checkpoint['state_dict'], strict=True)
 
+
     print("loaded weights from epoch: ", checkpoint["epoch"])
 
     return model
