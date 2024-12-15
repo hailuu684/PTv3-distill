@@ -26,6 +26,7 @@ module load Anaconda3
 ### First create conda environments
 conda create -n ptv3-distill -f /data/user/home/luutunghai@gmail.com/projects/test_cheaha/PTv3-distill/env.yml
 
+
 python test_cheaha.py
 
 
