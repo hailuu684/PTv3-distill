@@ -24,12 +24,39 @@ module load Anaconda3
 #conda activate ptv3-distill
 
 ### First create conda environments
-conda create -n ptv3-distill -f /data/user/home/luutunghai@gmail.com/projects/test_cheaha/PTv3-distill/env.yml
+conda env create -f /data/user/home/luutunghai@gmail.com/projects/test_cheaha/PTv3-distill/env.yml
 
+# Create and activate the Conda environment
+ENV_NAME="ptv3-distill"
+
+# Check if the environment already exists
+if ! conda info --envs | grep -q "$ENV_NAME"; then
+    echo "Creating Conda environment: $ENV_NAME"
+    conda create -y -n $ENV_NAME python=3.9
+fi
+
+# Activate the environment
+source activate $ENV_NAME
+
+# Install required Python packages
+
+conda install ninja -y
+conda install pytorch==2.1.0 torchvision==0.16.0 torchaudio==2.1.0 pytorch-cuda=11.8 -c pytorch -c nvidia
+conda install h5py pyyaml -c anaconda -y
+conda install sharedarray tensorboard tensorboardx yapf addict einops scipy plyfile termcolor timm -c conda-forge -y
+conda install pytorch-cluster pytorch-scatter pytorch-sparse -c pyg -y
+
+
+pip install --upgrade pip
+pip install torch-geometric
+pip install spconv-cu118  # choose version match your local cuda version
+pip install open3d
+pip install torch torchvision timm torch_scatter spconv
 
 python test_cheaha.py
 
-
+## Note on creating env following to collaborated environment yml: dependencies: - anaconda not defaults
+## Only install necessary packages to avoid conflict
 ## wget https://raw.githubusercontent.com/hailuu684/PTv3-distill/master/test_cheaha_hpc.job
 
 ## Different between login node and compute node: https://docs.rc.uab.edu/cheaha/getting_started/
