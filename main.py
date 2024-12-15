@@ -1,4 +1,5 @@
 import torch
+from torch.utils.tensorboard import SummaryWriter
 from dataloader import PTv3_Dataloader
 from PTv3_model import PointTransformerV3, load_weights_ptv3_nucscenes_seg
 from pointcept.engines.defaults import default_config_parser, default_setup
@@ -14,6 +15,9 @@ def main():
     # Load configuration
     cfg = default_config_parser(CONFIG_FILE, None)
     cfg = default_setup(cfg)
+
+    # Initialize TensorBoard
+    writer = SummaryWriter(log_dir='logs/ptv3_training')
 
     # Load the model
     model = PointTransformerV3(
@@ -63,17 +67,7 @@ def main():
     # Loss setup
     criteria = build_criteria(cfg.model.criteria)
 
-    # Define optimizer with parameter groups (if needed)
-    # if hasattr(model, "backbone") and hasattr(model, "head"):
-    #     optimizer = torch.optim.AdamW([
-    #         {"params": model.backbone.parameters(), "lr": 0.0002},
-    #         {"params": model.head.parameters(), "lr": 0.002},
-    #     ], weight_decay=cfg.optimizer.weight_decay)
-    #     max_lr = cfg.scheduler.max_lr  # List of max_lr values for parameter groups
-    # else:
-    #     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
-    #     max_lr = cfg.scheduler.max_lr[0]  # Single value for max_lr
-
+    # Optimizer and Scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
     max_lr = cfg.scheduler.max_lr[0]  # Single value for max_lr
 
@@ -91,6 +85,7 @@ def main():
     # Training loop
     model.train()
     num_epochs = cfg.epoch
+    os.makedirs('checkpoints', exist_ok=True)  # Ensure checkpoint directory exists
 
     for epoch in range(num_epochs):
         running_loss = 0.0
@@ -100,17 +95,6 @@ def main():
 
             # Forward pass
             seg_logits = model(input_dict)
-
-            # Extract the logits tensor for loss calculation
-            # if isinstance(seg_logits, dict) or hasattr(seg_logits, 'keys'):
-            #     logits_tensor = seg_logits.get("feat", None)  # Use the "feat" key
-            #     if logits_tensor is None:
-            #         raise KeyError("The key 'feat' is not present in seg_logits. Check your model's output structure.")
-            # elif isinstance(seg_logits, torch.Tensor):  # If it's already a tensor
-            #     logits_tensor = seg_logits
-            # else:
-            #     raise TypeError(f"Unexpected type for seg_logits: {type(seg_logits)}. Expected dict-like or torch.Tensor.")
-
             logits_tensor = seg_logits.get("feat", None)
 
             # Compute loss
@@ -124,6 +108,9 @@ def main():
             # Accumulate loss
             running_loss += loss.item()
 
+            # Log loss to TensorBoard
+            writer.add_scalar('Loss/train', loss.item(), epoch * len(train_loader) + batch_ndx)
+
             # Print progress every 10 batches
             if batch_ndx % 10 == 0:
                 print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_ndx}/{len(train_loader)}], Loss: {loss.item():.4f}")
@@ -131,8 +118,18 @@ def main():
         # Step the scheduler
         scheduler.step()
 
-        # Print epoch loss
-        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {running_loss / len(train_loader):.4f}")
+        # Print epoch loss and log to TensorBoard
+        avg_loss = running_loss / len(train_loader)
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {avg_loss:.4f}")
+        writer.add_scalar('Loss/epoch_avg', avg_loss, epoch + 1)
+
+        # Save checkpoints
+        if (epoch + 1) % cfg.eval_epoch == 0 or (epoch + 1) == num_epochs:
+            checkpoint_path = os.path.join('checkpoints', f'checkpoint_epoch_{epoch + 1}.pth')
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"Model checkpoint saved at {checkpoint_path}")
+
+    writer.close()
 
 
 def student_models():
