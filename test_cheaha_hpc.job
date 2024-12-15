@@ -18,9 +18,19 @@
 ### Loading the required CUDA and cuDNN modules
 module load CUDA/11.8.0
 module load cuDNN/8.9.2.26-CUDA-11.8.0
-module load python/38  # Adjust to the required version
 
 ### Loading the Anaconda module and activating the `tensorflow` environment
 module load Anaconda3
+#conda activate ptv3-distill
+
+### First create conda environments
+conda create -n ptv3-distill -f env.yaml
 
 python test_cheaha.py
+
+
+## wget https://raw.githubusercontent.com/hailuu684/PTv3-distill/master/test_cheaha_hpc.job
+
+## Different between login node and compute node: https://docs.rc.uab.edu/cheaha/getting_started/
+
+## ssh luutunghai@gmail.com@cheaha.rc.uab.edu / Hai@123456789141097
