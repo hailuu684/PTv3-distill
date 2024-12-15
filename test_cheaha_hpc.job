@@ -1,0 +1,23 @@
+#!/bin/bash
+#
+# SBATCH --job-name=ptv3-dítill
+# SBATCH --nodes=1
+# SBATCH --ntasks=1
+# SBATCH --ntasks-per-node=1
+# SBATCH --cpus-per-task=2
+# SBATCH --gres=gpu:1
+# SBATCH --mem=128G
+# #SBATCH --partition=amperenodes
+# SBATCH --partition=pascalnodes
+# SBATCH --time=1:00:00
+# SBATCH --output=terminal_logs/result_%j.txt
+# SBATCH --error=terminal_logs/error_%j.txt
+# SBATCH --mail-type=BEGIN,END,FAIL
+
+
+### Loading the required CUDA and cuDNN modules
+module load CUDA/12.2.0
+module load cuDNN/8.9.2.26-CUDA-12.2.0
+
+### Loading the Anaconda module and activating the `tensorflow` environment
+module load Anaconda3
