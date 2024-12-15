@@ -720,6 +720,7 @@ class PointTransformerV3(PointModule):
         point = self.enc(point)
         if not self.cls_mode:
             point = self.dec(point)
+            point = self.seg_head(point.feat)
         else:
             point.feat = torch_scatter.segment_csr(
                 src=point.feat,
@@ -727,9 +728,7 @@ class PointTransformerV3(PointModule):
                 reduce="mean",
             )
 
-        seg_logits = self.seg_head(point.feat)
-
-        return seg_logits
+        return point
 
 
 def load_weights_ptv3_nucscenes_seg(model, weight_path):
