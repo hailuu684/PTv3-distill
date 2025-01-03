@@ -15,7 +15,8 @@ class PTv3_Dataloader():
         self.init_fn = (
             partial(
                 worker_init_fn,
-                num_workers=self.cfg.num_worker_per_gpu,
+                # num_workers=self.cfg.num_worker_per_gpu,
+                num_workers=1,
                 rank=comm.get_rank(),
                 seed=self.cfg.seed,
             )
@@ -36,7 +37,7 @@ class PTv3_Dataloader():
             self.train_data,
             batch_size=self.cfg.batch_size_per_gpu,
             shuffle=(self.train_sampler is None),
-            num_workers=self.cfg.num_worker_per_gpu,
+            num_workers=1,
             sampler=self.train_sampler,
             collate_fn=partial(point_collate_fn, mix_prob=self.cfg.mix_prob),
             pin_memory=True,
@@ -59,7 +60,7 @@ class PTv3_Dataloader():
             self.val_data,
             batch_size=self.cfg.batch_size_val_per_gpu,
             shuffle=False,
-            num_workers=self.cfg.num_worker_per_gpu,
+            num_workers=1,
             pin_memory=True,
             sampler=self.val_sampler,
             collate_fn=collate_fn,

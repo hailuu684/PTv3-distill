@@ -1,7 +1,7 @@
 _base_ = ["../_base_/default_runtime.py"]
 
 # misc custom setting
-batch_size = 1  # bs: total bs in all gpus
+batch_size = 10  # bs: total bs in all gpus
 mix_prob = 0.8
 empty_cache = False
 enable_amp = True
@@ -99,7 +99,7 @@ param_dicts = [dict(keyword="block", lr=0.0002)]
 
 # dataset settings
 dataset_type = "NuScenesDataset"
-data_root = "/media/hdd/Dataset/sets/nuscenes"
+data_root = "/data/user/thomlestudy295@gmail.com/dataset/sets/nuscenes"
 ignore_index = -1
 names = [
     "barrier",

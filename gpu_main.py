@@ -184,15 +184,18 @@ def main():
     # Data load
     loader = PTv3_Dataloader(cfg)
     train_loader = loader.load_training_data()
+    
 
     # Move models to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     teacher_model = teacher_model.to(device)
     student_model = student_model.to(device)
+    # print("load model done")
 
     # Loss function
     detection_loss_fn = build_criteria(cfg.model.criteria)
     # lambda_param = cfg.model.lambda_param  # Weight for distillation loss
+    # print("Loss function done")
 
     # Optimizer for student model
     student_optimizer = torch.optim.AdamW(
@@ -200,7 +203,7 @@ def main():
         lr=cfg.optimizer.lr,
         weight_decay=cfg.optimizer.weight_decay
     )
-
+    # print("student_optimizer done")
     # It's unclear why there's a teacher_optimizer since the teacher is in eval mode.
     # If you intend to train the teacher, uncomment and modify the following:
     # teacher_optimizer = torch.optim.AdamW(
@@ -212,17 +215,23 @@ def main():
     # Training loop
     teacher_model.eval()  # Freeze the teacher model
     student_model.train()
+    print("Training loop done")
 
     num_epochs = cfg.epoch
     os.makedirs('checkpoints', exist_ok=True)
 
     num_classes = len(cfg.names)  # Assuming cfg.names contains class names
-
+    
     for epoch in range(num_epochs):
+        # print("loop")
+        print(enumerate(train_loader))
         for batch_ndx, input_dict in enumerate(train_loader):
+            # print("Loadding")
             # Move input data to device
             input_dict = {k: v.to(device, non_blocking=True) for k, v in input_dict.items()}
+            # print(input_dict)
             ground_truth = input_dict["segment"]
+            # print("Move input data to device done")
 
             # Forward pass through teacher model
             with torch.no_grad():
@@ -234,6 +243,7 @@ def main():
                     num_classes
                 )
                 teacher_miou = compute_miou(teacher_iou_scores)
+            # print("teacher model move done")
 
             # Forward pass through student model
             student_seg_logits, student_latent_feature = student_model(input_dict)
@@ -244,6 +254,7 @@ def main():
                 num_classes
             )
             student_miou = compute_miou(student_iou_scores)
+            # print("teacher model move done")
 
             # Compute detection loss for the teacher model (optional, since teacher is frozen)
             # If the teacher is frozen, this loss is not used for backpropagation
@@ -283,7 +294,7 @@ def main():
                 )
 
         # Save checkpoints
-        if (epoch + 1) % cfg.eval_epoch == 0 or (epoch + 1) == num_epochs:
+        if (epoch + 1) % 5 == 0 or (epoch + 1) == num_epochs:
             checkpoint_path = os.path.join('checkpoints', f'student_checkpoint_epoch_{epoch + 1}.pth')
             torch.save(student_model.state_dict(), checkpoint_path)
             print(f"Student model checkpoint saved at {checkpoint_path}")
