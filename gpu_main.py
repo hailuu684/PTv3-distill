@@ -352,8 +352,14 @@ def main(use_gradient_guided=False):
                     f"Student mIoU: {student_miou.item():.4f}, "
                     f"Teacher Loss: {teacher_loss.item():.4f}, "
                     f"Teacher mIoU: {teacher_miou.item():.4f}, "
-                    f"Chamfer Loss: {chamfer_loss.item():.4f}"
+                    f"Chamfer Loss: {chamfer_loss.item():.4f},"
+                    f"KLD Loss: {kld_loss.item():.4f}"
                 )
+
+                if use_gradient_guided:
+                    print(f"Gradient-guided Loss: {distillation_loss.item():.4f}")
+
+                print("-------------------------------------------")
 
         # Save checkpoints
         if (epoch + 1) % 5 == 0 or (epoch + 1) == num_epochs:
