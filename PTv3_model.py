@@ -12,8 +12,10 @@ import torch
 import torch.nn as nn
 import spconv.pytorch as spconv
 import torch_scatter
+import numpy as np
 from timm.models.layers import DropPath
 from collections import OrderedDict
+import ripserplusplus as rpp_py
 try:
     import flash_attn
 except ImportError:
@@ -559,6 +561,7 @@ class PointTransformerV3(PointModule):
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -704,6 +707,32 @@ class PointTransformerV3(PointModule):
                     )
                 self.dec.add(module=dec, name=f"dec{s}")
 
+    # def forward(self, data_dict):
+
+    #     context = self.embedding_table(
+    #         torch.tensor([0], device=data_dict["coord"].device)
+    #     )
+
+    #     data_dict["context"] = context # --> might be helpful here
+
+    #     point = Point(data_dict)
+    #     point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
+    #     point.sparsify()
+
+    #     point = self.embedding(point)
+    #     point = self.enc(point)
+    #     if not self.cls_mode:
+    #         point = self.dec(point)
+    #         point = self.seg_head(point.feat)
+    #     else:
+    #         point.feat = torch_scatter.segment_csr(
+    #             src=point.feat,
+    #             indptr=nn.functional.pad(point.offset, (1, 0)),
+    #             reduce="mean",
+    #         )
+
+    #     return point
+
     def forward(self, data_dict):
 
         context = self.embedding_table(
@@ -717,10 +746,20 @@ class PointTransformerV3(PointModule):
         point.sparsify()
 
         point = self.embedding(point)
+        # print("Latent space after embedding:", point.feat.shape)
         point = self.enc(point)
+        # for idx, stage in enumerate(self.enc):
+        #     point = stage(point)
+        #     print(f"Latent space after encoder stage {idx}:", point.feat.shape)
+        # print("Final latent space before decoder:", point.feat.shape)
+        # import numpy as np
+        # np.save("./point_feat.npy", point.feat.cpu().detach().numpy())
+        latent_space = np.rot90(point.feat.cpu().detach().numpy())
+        pe_latent_space = rpp_py.run("--format point-cloud --dim 2 --sparse", latent_space)
+        TDA_latent_feature = [torch.tensor(np.array(value.tolist())).to(self.device) for key, value in sorted(pe_latent_space.items())]
+
         if not self.cls_mode:
             point = self.dec(point)
-            point = self.seg_head(point.feat)
         else:
             point.feat = torch_scatter.segment_csr(
                 src=point.feat,
@@ -728,25 +767,57 @@ class PointTransformerV3(PointModule):
                 reduce="mean",
             )
 
-        return point
+        seg_logits = self.seg_head(point.feat)
+
+        return seg_logits, TDA_latent_feature
 
 
-def load_weights_ptv3_nucscenes_seg(model, weight_path):
-    print("Loading weight from: ", weight_path)
 
-    checkpoint = torch.load(weight_path)
+# def load_weights_ptv3_nucscenes_seg(model, weight_path):
+#     print("Loading weight from: ", weight_path)
 
-    # Adjust the keys by removing the 'backbone.' prefix
-    adjusted_state_dict = {key.replace('module.backbone.', ''): value for key, value in checkpoint['state_dict'].items()}
-    adjusted_state_dict = {key.replace('module.seg_head.', 'seg_head.'): value for key, value in
-                           adjusted_state_dict.items()}
+#     checkpoint = torch.load(weight_path)
 
-    print("WARNING!!! Embedding table cannot be loaded from pretrained weights but it might be not necessary")
+#     # Adjust the keys by removing the 'backbone.' prefix
+#     adjusted_state_dict = {key.replace('module.backbone.', ''): value for key, value in checkpoint['state_dict'].items()}
+#     adjusted_state_dict = {key.replace('module.seg_head.', 'seg_head.'): value for key, value in
+#                            adjusted_state_dict.items()}
+
+#     print("WARNING!!! Embedding table cannot be loaded from pretrained weights but it might be not necessary")
+#     model.load_state_dict(adjusted_state_dict, strict=False)
+#     # model.load_state_dict(checkpoint['state_dict'], strict=True)
+
+
+#     print("loaded weights from epoch: ", checkpoint["epoch"])
+
+#     return model
+
+
+def load_weights_ptv3_nucscenes_seg(model, checkpoint_path):
+    # Load the checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
+    
+    # print(f"Checkpoint loaded from: {checkpoint_path}")
+    # print(f"Checkpoint keys: {checkpoint.keys()}")
+    
+    # Since there's no 'state_dict', we assume the model's weights are at the top level
+    # Create a new state dict to match the model's parameter names
+    model_state_dict = model.state_dict()
+
+    # Adjust the checkpoint weights to match model's state_dict keys
+    # We assume that the checkpoint weights directly correspond to model layers
+    adjusted_state_dict = {}
+    
+    for key, value in checkpoint.items():
+        # If the model and checkpoint keys align, add them
+        if key in model_state_dict:
+            adjusted_state_dict[key] = value
+        else:
+            print(f"Warning: Key '{key}' not found in model state_dict.")
+
+    # Load the adjusted state dict into the model
     model.load_state_dict(adjusted_state_dict, strict=False)
-    # model.load_state_dict(checkpoint['state_dict'], strict=True)
 
-
-    print("loaded weights from epoch: ", checkpoint["epoch"])
-
+    print("Model weights loaded successfully.")
     return model
 

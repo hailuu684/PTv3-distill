@@ -12,7 +12,6 @@ import torch.nn.functional as F
 PRETRAINED_PATH = './checkpoints/checkpoint_epoch_50_backup.pth'
 CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-base.py"
 
-
 def compute_iou_all_classes(preds, labels, num_classes):
     """
     Compute IoU for all classes using GPU operations.
@@ -44,7 +43,6 @@ def compute_iou_all_classes(preds, labels, num_classes):
 
     return iou_scores
 
-
 def compute_miou(iou_scores):
     """
     Compute the mean Intersection over Union (mIoU) from the IoU scores.
@@ -59,7 +57,6 @@ def compute_miou(iou_scores):
     valid_iou = iou_scores[~iou_scores.isnan()]
     miou = valid_iou.mean() if valid_iou.numel() > 0 else torch.tensor(0.0, device=iou_scores.device)
     return miou
-
 
 def get_teacher_model(cfg):
     """
@@ -102,7 +99,6 @@ def get_teacher_model(cfg):
         pdnorm_affine=model_config.pdnorm_affine
     )
 
-
 def get_student_model(cfg):
     """
     Create a student model with the same architecture as the teacher model.
@@ -144,7 +140,6 @@ def get_student_model(cfg):
         pdnorm_affine=model_config.pdnorm_affine
     )
 
-
 def compute_chamfer_loss(persistence_diagram_1, persistence_diagram_2):
     """
     Compute the Chamfer loss between two persistence diagrams.
@@ -168,7 +163,6 @@ def compute_chamfer_loss(persistence_diagram_1, persistence_diagram_2):
         total_loss += loss_chamfer
 
     return total_loss
-
 
 def main(use_gradient_guided=False):
     # Load configuration
@@ -215,14 +209,14 @@ def main(use_gradient_guided=False):
     # print("student_optimizer done")
     # It's unclear why there's a teacher_optimizer since the teacher is in eval mode.
     # If you intend to train the teacher, uncomment and modify the following:
-    # teacher_optimizer = torch.optim.AdamW(
-    #     teacher_model.parameters(),
-    #     lr=cfg.optimizer.lr,
-    #     weight_decay=cfg.optimizer.weight_decay
-    # )
+    teacher_optimizer = torch.optim.AdamW(
+        teacher_model.parameters(),
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.weight_decay
+    )
 
     # Training loop
-    teacher_model.eval()  # Freeze the teacher model
+    teacher_model.train()  # Freeze the teacher model
     student_model.train()
     print("Training loop done")
 
@@ -232,8 +226,6 @@ def main(use_gradient_guided=False):
     num_classes = len(cfg.names)  # Assuming cfg.names contains class names
 
     for epoch in range(num_epochs):
-        # print("loop")
-        print(enumerate(train_loader))
         for batch_ndx, input_dict in enumerate(train_loader):
             # print("Loadding")
             # Move input data to device
@@ -252,7 +244,6 @@ def main(use_gradient_guided=False):
                     num_classes
                 )
                 teacher_miou = compute_miou(teacher_iou_scores)
-            # print("teacher model move done")
 
             # Forward pass through student model
             student_seg_logits, student_latent_feature = student_model(input_dict) # teacher_latent_feature (N, 512)
@@ -263,11 +254,12 @@ def main(use_gradient_guided=False):
                 num_classes
             )
             student_miou = compute_miou(student_iou_scores)
-            # print("teacher model move done")
 
             # Compute detection loss for the teacher model (optional, since teacher is frozen)
             # If the teacher is frozen, this loss is not used for backpropagation / added regularization term
-            teacher_loss = detection_loss_fn(teacher_seg_logits, ground_truth) + torch.mean(teacher_latent_feature ** 2)
+            # print(teacher_latent_feature)
+            # teacher_loss = detection_loss_fn(teacher_seg_logits, ground_truth) + torch.mean(teacher_latent_feature ** 2)
+            teacher_loss = detection_loss_fn(teacher_seg_logits, ground_truth)
 
             # Compute detection loss for the student model
             student_loss = detection_loss_fn(student_seg_logits, ground_truth)

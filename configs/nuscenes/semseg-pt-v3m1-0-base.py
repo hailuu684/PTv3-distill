@@ -1,7 +1,7 @@
 _base_ = ["../_base_/default_runtime.py"]
 
 # misc custom setting
-batch_size = 1  # bs: total bs in all gpus
+batch_size = 3  # bs: total bs in all gpus
 mix_prob = 0.8
 empty_cache = False
 enable_amp = True
@@ -11,7 +11,7 @@ model = dict(
     type="DefaultSegmentorV2",
     num_classes=16,
     backbone_out_channels=64,
-    backbone=dict(
+    teacher_backbone=dict(
         type="PT-v3m1",
         in_channels=4,
         order=["z", "z-trans", "hilbert", "hilbert-trans"],
@@ -23,13 +23,46 @@ model = dict(
         dec_depths=(2, 2, 2, 2),
         dec_channels=(64, 64, 128, 256),
         dec_num_head=(4, 4, 8, 16),
-        dec_patch_size=(1024, 1024, 1024, 1024),    
+        dec_patch_size=(1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
         qk_scale=None,
         attn_drop=0.0,
         proj_drop=0.0,
         drop_path=0.3,
+        shuffle_orders=True,
+        pre_norm=True,
+        enable_rpe=False,
+        enable_flash=False,
+        upcast_attention=False,
+        upcast_softmax=False,
+        cls_mode=False,
+        pdnorm_bn=False,
+        pdnorm_ln=False,
+        pdnorm_decouple=True,
+        pdnorm_adaptive=False,
+        pdnorm_affine=True,
+        pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo"),
+    ),
+    student_backbone=dict(
+        type="PT-v3m1",
+        in_channels=4,
+        order=["z", "z-trans", "hilbert", "hilbert-trans"],
+        stride=(2, 2, 2, 2),
+        enc_depths=(1, 1, 1, 2, 1),  # 20% of the teacher's depths
+        enc_channels=(16, 16, 32, 64, 128),  # Reduced channels
+        enc_num_head=(1, 1, 2, 4, 8),  # Reduced number of attention heads
+        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
+        dec_depths=(1, 1, 1, 1),  # Reduced decoder depths
+        dec_channels=(64, 64, 128, 128),
+        dec_num_head=(2, 2, 4, 8),  # Reduced decoder attention heads
+        dec_patch_size=(1024, 1024, 1024, 1024),
+        mlp_ratio=4,
+        qkv_bias=True,
+        qk_scale=None,
+        attn_drop=0.0,
+        proj_drop=0.0,
+        drop_path=0.15,
         shuffle_orders=True,
         pre_norm=True,
         enable_rpe=False,
@@ -52,7 +85,7 @@ model = dict(
 
 # scheduler settings
 epoch = 50
-eval_epoch = 1
+eval_epoch = 50
 optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
 scheduler = dict(
     type="OneCycleLR",
@@ -66,7 +99,7 @@ param_dicts = [dict(keyword="block", lr=0.0002)]
 
 # dataset settings
 dataset_type = "NuScenesDataset"
-data_root = "/media/hdd/Dataset/nuscenes"
+data_root = "/data/user/thomlestudy295@gmail.com/dataset/sets/nuscenes"
 ignore_index = -1
 names = [
     "barrier",

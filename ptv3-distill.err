@@ -1,0 +1,5 @@
+/home/thomlestudy295@gmail.com/.conda/envs/thomas_pointcept/lib/python3.8/site-packages/timm/models/layers/__init__.py:48: FutureWarning: Importing from timm.models.layers is deprecated, please import via timm.layers
+  warnings.warn(f"Importing from {__name__} is deprecated, please import via timm.layers", FutureWarning)
+[2025-01-13 00:12:14,580 INFO defaults.py line 68 126690] Totally 28130 x 1 samples in train set.
+/home/thomlestudy295@gmail.com/.conda/envs/thomas_pointcept/lib/python3.8/site-packages/torch/utils/data/dataloader.py:557: UserWarning: This DataLoader will create 16 worker processes in total. Our suggested max number of worker in current system is 1, which is smaller than what this DataLoader is going to create. Please be aware that excessive worker creation might get DataLoader running slow or even freeze, lower the worker number to avoid potential slowness/freeze if necessary.
+  warnings.warn(_create_warning_msg(
