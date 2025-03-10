@@ -53,8 +53,8 @@ class DefaultSegmentorV2(nn.Module):
     def forward(self, input_dict):
         point = Point(input_dict)
         point = self.backbone(point)
-        print("point")
-        print(point["feat"].shape)
+        # print("point")
+        # print(point["feat"].shape)
 
         # Backbone added after v1.5.0 return Point instead of feat and use DefaultSegmentorV2
         # TODO: remove this part after make all backbone return Point only.
@@ -63,7 +63,7 @@ class DefaultSegmentorV2(nn.Module):
         else:
             feat = point
         seg_logits = self.seg_head(feat)
-        print(seg_logits.shape)
+        # print(seg_logits.shape)
         # train
         if self.training:
             loss = self.criteria(seg_logits, input_dict["segment"])

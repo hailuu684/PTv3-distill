@@ -94,9 +94,9 @@ class TesterBase:
             test_sampler = None
         test_loader = torch.utils.data.DataLoader(
             test_dataset,
-            batch_size=self.cfg.batch_size_test_per_gpu,
+            batch_size=self.cfg.batch_size_test,
             shuffle=False,
-            num_workers=self.cfg.batch_size_test_per_gpu,
+            num_workers=self.cfg.num_worker,
             pin_memory=True,
             sampler=test_sampler,
             collate_fn=self.__class__.collate_fn,
@@ -114,6 +114,7 @@ class TesterBase:
 @TESTERS.register_module()
 class SemSegTester(TesterBase):
     def test(self):
+
         assert self.test_loader.batch_size == 1
         logger = get_root_logger()
         logger.info(">>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>")
@@ -165,55 +166,47 @@ class SemSegTester(TesterBase):
             segment = data_dict.pop("segment")
             data_name = data_dict.pop("name")
             pred_save_path = os.path.join(save_path, "{}_pred.npy".format(data_name))
-            if os.path.isfile(pred_save_path):
-                logger.info(
-                    "{}/{}: {}, loaded pred and label.".format(
-                        idx + 1, len(self.test_loader), data_name
-                    )
+            # if os.path.isfile(pred_save_path):
+            #     logger.info(
+            #         "{}/{}: {}, loaded pred and label.".format(
+            #             idx + 1, len(self.test_loader), data_name
+            #         )
+            #     )
+            #     pred = np.load(pred_save_path)
+            #     if "origin_segment" in data_dict.keys():
+            #         segment = data_dict["origin_segment"]
+            # else:
+            pred = torch.zeros((segment.size, self.cfg.data.num_classes)).cuda()
+            for i in range(len(fragment_list)):
+                fragment_batch_size = 1
+                s_i, e_i = i * fragment_batch_size, min(
+                    (i + 1) * fragment_batch_size, len(fragment_list)
                 )
-                pred = np.load(pred_save_path)
-                if "origin_segment" in data_dict.keys():
-                    segment = data_dict["origin_segment"]
-            else:
-                pred = torch.zeros((segment.size, self.cfg.data.num_classes)).cuda()
-                for i in range(len(fragment_list)):
-                    fragment_batch_size = 1
-                    s_i, e_i = i * fragment_batch_size, min(
-                        (i + 1) * fragment_batch_size, len(fragment_list)
-                    )
-                    input_dict = collate_fn(fragment_list[s_i:e_i])
-                    for key in input_dict.keys():
-                        if isinstance(input_dict[key], torch.Tensor):
-                            input_dict[key] = input_dict[key].cuda(non_blocking=True)
-                    idx_part = input_dict["index"]
-                    with torch.no_grad():
-                        pred_part = self.model(input_dict)["seg_logits"]  # (n, k)
-                        pred_part = F.softmax(pred_part, -1)
-                        if self.cfg.empty_cache:
-                            torch.cuda.empty_cache()
-                        bs = 0
-                        for be in input_dict["offset"]:
-                            pred[idx_part[bs:be], :] += pred_part[bs:be]
-                            bs = be
+                input_dict = collate_fn(fragment_list[s_i:e_i])
+                for key in input_dict.keys():
+                    if isinstance(input_dict[key], torch.Tensor):
+                        input_dict[key] = input_dict[key].cuda(non_blocking=True)
+                idx_part = input_dict["index"]
+                with torch.no_grad():
+                    pred_part = self.model(input_dict)["seg_logits"]  # (n, k)
+                    pred_part = F.softmax(pred_part, -1)
+                    if self.cfg.empty_cache:
+                        torch.cuda.empty_cache()
+                    bs = 0
+                    for be in input_dict["offset"]:
+                        pred[idx_part[bs:be], :] += pred_part[bs:be]
+                        bs = be
 
-                    logger.info(
-                        "Test: {}/{}-{data_name}, Batch: {batch_idx}/{batch_num}".format(
-                            idx + 1,
-                            len(self.test_loader),
-                            data_name=data_name,
-                            batch_idx=i,
-                            batch_num=len(fragment_list),
-                        )
-                    )
-                if self.cfg.data.test.type == "ScanNetPPDataset":
-                    pred = pred.topk(3, dim=1)[1].data.cpu().numpy()
-                else:
-                    pred = pred.max(1)[1].data.cpu().numpy()
-                if "origin_segment" in data_dict.keys():
-                    assert "inverse" in data_dict.keys()
-                    pred = pred[data_dict["inverse"]]
-                    segment = data_dict["origin_segment"]
-                np.save(pred_save_path, pred)
+            if self.cfg.data.test.type == "ScanNetPPDataset":
+                pred = pred.topk(3, dim=1)[1].data.cpu().numpy()
+            else:
+                pred = pred.max(1)[1].data.cpu().numpy()
+            if "origin_segment" in data_dict.keys():
+                assert "inverse" in data_dict.keys()
+                pred = pred[data_dict["inverse"]]
+                segment = data_dict["origin_segment"]
+            np.save(pred_save_path, pred)
+
             if (
                 self.cfg.data.test.type == "ScanNetDataset"
                 or self.cfg.data.test.type == "ScanNet200Dataset"
@@ -546,95 +539,192 @@ class ClsVotingTester(TesterBase):
 
 
 @TESTERS.register_module()
-class PartSegTester(TesterBase):
+class CustomSemSegTester(TesterBase):
+
     def test(self):
-        test_dataset = self.test_loader.dataset
+
+        assert self.test_loader.batch_size == 1, "Batch size of test data should be 1"
         logger = get_root_logger()
         logger.info(">>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>")
 
         batch_time = AverageMeter()
-
-        num_categories = len(self.test_loader.dataset.categories)
-        iou_category, iou_count = np.zeros(num_categories), np.zeros(num_categories)
+        intersection_meter = AverageMeter()
+        union_meter = AverageMeter()
+        target_meter = AverageMeter()
         self.model.eval()
 
-        save_path = os.path.join(
-            self.cfg.save_path, "result", "test_epoch{}".format(self.cfg.test_epoch)
-        )
+        save_path = os.path.join(self.cfg.save_path, "result")
         make_dirs(save_path)
+        # create submit folder only on main process
+        if (
+                self.cfg.data.test.type == "ScanNetDataset"
+                or self.cfg.data.test.type == "ScanNet200Dataset"
+                or self.cfg.data.test.type == "ScanNetPPDataset"
+        ) and comm.is_main_process():
+            make_dirs(os.path.join(save_path, "submit"))
+        elif (
+                self.cfg.data.test.type == "SemanticKITTIDataset" and comm.is_main_process()
+        ):
+            make_dirs(os.path.join(save_path, "submit"))
+        elif self.cfg.data.test.type == "NuScenesDataset" and comm.is_main_process():
+            import json
 
-        for idx in range(len(test_dataset)):
-            end = time.time()
-            data_name = test_dataset.get_data_name(idx)
-
-            data_dict_list, label = test_dataset[idx]
-            pred = torch.zeros((label.size, self.cfg.data.num_classes)).cuda()
-            batch_num = int(np.ceil(len(data_dict_list) / self.cfg.batch_size_test))
-            for i in range(batch_num):
-                s_i, e_i = i * self.cfg.batch_size_test, min(
-                    (i + 1) * self.cfg.batch_size_test, len(data_dict_list)
+            make_dirs(os.path.join(save_path, "submit", "lidarseg", "test"))
+            make_dirs(os.path.join(save_path, "submit", "test"))
+            submission = dict(
+                meta=dict(
+                    use_camera=False,
+                    use_lidar=True,
+                    use_radar=False,
+                    use_map=False,
+                    use_external=False,
                 )
-                input_dict = collate_fn(data_dict_list[s_i:e_i])
+            )
+            with open(
+                    os.path.join(save_path, "submit", "test", "submission.json"), "w"
+            ) as f:
+                json.dump(submission, f, indent=4)
+
+        comm.synchronize()
+        record = {}
+        # fragment inference
+        for idx, data_dict in enumerate(self.test_loader):
+
+            end = time.time()
+            data_dict = data_dict[0]  # current assume batch size is 1
+            fragment_list = data_dict.pop("fragment_list")
+            segment = data_dict.pop("segment")
+            data_name = data_dict.pop("name")
+            # pred_save_path = os.path.join(save_path, "{}_pred.npy".format(data_name))
+            # if os.path.isfile(pred_save_path):
+            #     logger.info(
+            #         "{}/{}: {}, loaded pred and label.".format(
+            #             idx + 1, len(self.test_loader), data_name
+            #         )
+            #     )
+            #     pred = np.load(pred_save_path)
+            #     if "origin_segment" in data_dict.keys():
+            #         segment = data_dict["origin_segment"]
+            # else:
+            pred = torch.zeros((segment.size, self.cfg.data.num_classes)).cuda()
+            for i in range(len(fragment_list)):
+                fragment_batch_size = 1
+                s_i, e_i = i * fragment_batch_size, min(
+                    (i + 1) * fragment_batch_size, len(fragment_list)
+                )
+                input_dict = collate_fn(fragment_list[s_i:e_i])
                 for key in input_dict.keys():
                     if isinstance(input_dict[key], torch.Tensor):
                         input_dict[key] = input_dict[key].cuda(non_blocking=True)
+                idx_part = input_dict["index"]
                 with torch.no_grad():
-                    pred_part = self.model(input_dict)["cls_logits"]
-                    pred_part = F.softmax(pred_part, -1)
-                if self.cfg.empty_cache:
-                    torch.cuda.empty_cache()
-                pred_part = pred_part.reshape(-1, label.size, self.cfg.data.num_classes)
-                pred = pred + pred_part.total(dim=0)
-                logger.info(
-                    "Test: {} {}/{}, Batch: {batch_idx}/{batch_num}".format(
-                        data_name,
-                        idx + 1,
-                        len(test_dataset),
-                        batch_idx=i,
-                        batch_num=batch_num,
-                    )
-                )
-            pred = pred.max(1)[1].data.cpu().numpy()
+                    pred_part = self.model(input_dict)  # (n, k)
 
-            category_index = data_dict_list[0]["cls_token"]
-            category = self.test_loader.dataset.categories[category_index]
-            parts_idx = self.test_loader.dataset.category2part[category]
-            parts_iou = np.zeros(len(parts_idx))
-            for j, part in enumerate(parts_idx):
-                if (np.sum(label == part) == 0) and (np.sum(pred == part) == 0):
-                    parts_iou[j] = 1.0
-                else:
-                    i = (label == part) & (pred == part)
-                    u = (label == part) | (pred == part)
-                    parts_iou[j] = np.sum(i) / (np.sum(u) + 1e-10)
-            iou_category[category_index] += parts_iou.mean()
-            iou_count[category_index] += 1
+                    # pred_part = pred_part["seg_logits"]
+                    pred_part = F.softmax(pred_part, -1)
+                    if self.cfg.empty_cache:
+                        torch.cuda.empty_cache()
+                    bs = 0
+                    for be in input_dict["offset"]:
+                        pred[idx_part[bs:be], :] += pred_part[bs:be]
+                        bs = be
+
+            pred = torch.argmax(pred, dim=1)
+            segment = torch.from_numpy(segment).to(pred.device)
+            intersection, union, target = intersection_and_union_gpu(
+                pred, segment, self.cfg.data.num_classes, self.cfg.data.ignore_index
+            )
+
+            intersection_meter.update(intersection)
+            union_meter.update(union)
+            target_meter.update(target)
+            record[data_name] = dict(
+                intersection=intersection, union=union, target=target
+            )
+
+            mask = union != 0
+            iou_class = intersection / (union + 1e-10)
+
+            acc = sum(intersection) / (sum(target) + 1e-10)
+
+            iou = torch.mean(iou_class[mask])  # Directly use PyTorch mean
+            m_iou = torch.mean(intersection_meter.sum / (union_meter.sum + 1e-10))
+            m_acc = torch.mean(intersection_meter.sum / (target_meter.sum + 1e-10))
 
             batch_time.update(time.time() - end)
             logger.info(
-                "Test: {} [{}/{}] "
-                "Batch {batch_time.val:.3f} "
-                "({batch_time.avg:.3f}) ".format(
-                    data_name, idx + 1, len(self.test_loader), batch_time=batch_time
+                "Test: {} [{}/{}]-{} "
+                "Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) "
+                "Accuracy {acc:.4f} ({m_acc:.4f}) "
+                "mIoU {iou:.4f} ({m_iou:.4f})".format(
+                    data_name,
+                    idx + 1,
+                    len(self.test_loader),
+                    segment.shape,
+                    batch_time=batch_time,
+                    acc=acc,
+                    m_acc=m_acc,
+                    iou=iou,
+                    m_iou=m_iou,
                 )
             )
 
-        ins_mIoU = iou_category.sum() / (iou_count.sum() + 1e-10)
-        cat_mIoU = (iou_category / (iou_count + 1e-10)).mean()
-        logger.info(
-            "Val result: ins.mIoU/cat.mIoU {:.4f}/{:.4f}.".format(ins_mIoU, cat_mIoU)
-        )
-        for i in range(num_categories):
+        logger.info("Syncing ...")
+        comm.synchronize()
+        record_sync = comm.gather(record, dst=0)
+
+        if comm.is_main_process():
+            record = {}
+            for _ in range(len(record_sync)):
+                r = record_sync.pop()
+                record.update(r)
+                del r
+
+            # Convert list of tensors to stacked tensor for sum operation
+            intersection = torch.sum(torch.stack([meters["intersection"] for _, meters in record.items()]), dim=0)
+            union = torch.sum(torch.stack([meters["union"] for _, meters in record.items()]), dim=0)
+            target = torch.sum(torch.stack([meters["target"] for _, meters in record.items()]), dim=0)
+
+            # Compute IoU and accuracy using PyTorch operations
+            iou_class = intersection / (union + 1e-10)
+            accuracy_class = intersection / (target + 1e-10)
+
+            # Compute mean IoU and mean Accuracy using torch.mean()
+            mIoU = torch.mean(iou_class)
+            mAcc = torch.mean(accuracy_class)
+
+            # Compute overall Accuracy
+            allAcc = torch.sum(intersection) / (torch.sum(target) + 1e-10)
+
             logger.info(
-                "Class_{idx}-{name} Result: iou_cat/num_sample {iou_cat:.4f}/{iou_count:.4f}".format(
-                    idx=i,
-                    name=self.test_loader.dataset.categories[i],
-                    iou_cat=iou_category[i] / (iou_count[i] + 1e-10),
-                    iou_count=int(iou_count[i]),
+                "Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}".format(
+                    mIoU, mAcc, allAcc
                 )
             )
-        logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
+
+            miou_result_file = os.path.join(self.cfg.miou_result_path, "miou_results.txt")
+            with open(miou_result_file, "w") as f:
+                for i in range(self.cfg.data.num_classes):
+                    result_line = "Class_{idx} - {name} Result: iou/accuracy {iou:.4f}/{accuracy:.4f}".format(
+                        idx=i,
+                        name=self.cfg.data.names[i],
+                        iou=iou_class[i].item(),  # Convert tensor to float
+                        accuracy=accuracy_class[i].item(),  # Convert tensor to float
+                    )
+
+                    # Print to console (optional)
+                    logger.info(result_line)
+
+                    # Write to file
+                    f.write(result_line + "\n")
+
+            logger.info("<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<")
+
+
 
     @staticmethod
     def collate_fn(batch):
-        return collate_fn(batch)
+        return batch
+
+
+

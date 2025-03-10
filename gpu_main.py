@@ -1,5 +1,5 @@
 import torch
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 from dataloader import PTv3_Dataloader
 from PTv3_model import PointTransformerV3, load_weights_ptv3_nucscenes_seg
 from pointcept.engines.defaults import default_config_parser, default_setup
@@ -9,11 +9,43 @@ from pytorch3d.loss import chamfer_distance
 import torch.nn.functional as F
 
 # Pretrained model path and config file
-PRETRAINED_PATH = './checkpoints/checkpoint_epoch_50_backup.pth'
+PRETRAINED_PATH = './checkpoints/model_best.pth' #'./checkpoints/checkpoint_epoch_50_backup.pth'
 CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-base.py"
 
 
-def compute_iou_all_classes(preds, labels, num_classes):
+# def compute_iou_all_classes(preds, labels, num_classes):
+#     """
+#     Compute IoU for all classes using GPU operations.
+#
+#     Args:
+#         preds (torch.Tensor): Predicted labels of shape [N].
+#         labels (torch.Tensor): Ground truth labels of shape [N].
+#         num_classes (int): Number of classes.
+#
+#     Returns:
+#         torch.Tensor: IoU scores for each class.
+#     """
+#     preds = preds.view(-1)
+#     labels = labels.view(-1)
+#
+#     iou_scores = torch.zeros(num_classes, device=preds.device)
+#
+#     for class_id in range(num_classes):
+#         pred_inds = preds == class_id
+#         target_inds = labels == class_id
+#
+#         intersection = (pred_inds & target_inds).sum().float()
+#         union = (pred_inds | target_inds).sum().float()
+#
+#         if union > 0:
+#             iou_scores[class_id] = intersection / union
+#         else:
+#             iou_scores[class_id] = float('nan')  # Use NaN for classes not present
+#
+#     return iou_scores
+
+
+def compute_iou_all_classes(preds, labels, num_classes, ignore_index=-1):
     """
     Compute IoU for all classes using GPU operations.
 
@@ -21,6 +53,7 @@ def compute_iou_all_classes(preds, labels, num_classes):
         preds (torch.Tensor): Predicted labels of shape [N].
         labels (torch.Tensor): Ground truth labels of shape [N].
         num_classes (int): Number of classes.
+        ignore_index (int): Ignore label for invalid pixels.
 
     Returns:
         torch.Tensor: IoU scores for each class.
@@ -28,19 +61,24 @@ def compute_iou_all_classes(preds, labels, num_classes):
     preds = preds.view(-1)
     labels = labels.view(-1)
 
-    iou_scores = torch.zeros(num_classes, device=preds.device)
+    # Mask out ignored values
+    valid_mask = labels != ignore_index
+    preds = preds[valid_mask]
+    labels = labels[valid_mask]
+
+    # Compute intersection and union efficiently
+    intersection = torch.zeros(num_classes, device=preds.device)
+    union = torch.zeros(num_classes, device=preds.device)
 
     for class_id in range(num_classes):
         pred_inds = preds == class_id
         target_inds = labels == class_id
 
-        intersection = (pred_inds & target_inds).sum().float()
-        union = (pred_inds | target_inds).sum().float()
+        intersection[class_id] = (pred_inds & target_inds).sum().float()
+        union[class_id] = (pred_inds | target_inds).sum().float()
 
-        if union > 0:
-            iou_scores[class_id] = intersection / union
-        else:
-            iou_scores[class_id] = float('nan')  # Use NaN for classes not present
+    # Ensure missing classes get IoU=0 instead of NaN
+    iou_scores = torch.where(union > 0, intersection / (union + 1e-10), torch.tensor(0.0, device=preds.device))
 
     return iou_scores
 
@@ -159,6 +197,11 @@ def compute_chamfer_loss(persistence_diagram_1, persistence_diagram_2):
     total_loss = 0.0
 
     for pd1, pd2 in zip(persistence_diagram_1, persistence_diagram_2):
+
+        # Normalize persistence diagram
+        pd1 = normalize_diagram(pd1)
+        pd2 = normalize_diagram(pd2)
+
         # Ensure the tensors are on the same device
         pd1 = pd1.to(persistence_diagram_1[0].device).unsqueeze(0)  # [1, N, D]
         pd2 = pd2.to(persistence_diagram_2[0].device).unsqueeze(0)  # [1, N, D]
@@ -170,13 +213,28 @@ def compute_chamfer_loss(persistence_diagram_1, persistence_diagram_2):
     return total_loss
 
 
+def normalize_diagram(diagram):
+    """
+    Min-max normalize a persistence diagram.
+
+    Args:
+        diagram (torch.Tensor): Tensor of shape (N, 2) with [birth, death] pairs.
+    Returns:
+        Tensor: Normalized tensor with values in [0, 1].
+    """
+    min_val = torch.min(diagram)
+    max_val = torch.max(diagram)
+    normalized_diagram = (diagram - min_val) / (max_val - min_val + 1e-8)
+    return normalized_diagram
+
+
 def main(use_gradient_guided=False):
     # Load configuration
     cfg = default_config_parser(CONFIG_FILE, None)
     cfg = default_setup(cfg)
 
     # Initialize TensorBoard
-    writer = SummaryWriter(log_dir='logs/ptv3_training')
+    # writer = SummaryWriter(log_dir='logs/ptv3_training')
 
     # Load teacher model
     teacher_model = get_teacher_model(cfg)
@@ -224,7 +282,7 @@ def main(use_gradient_guided=False):
     # Training loop
     teacher_model.eval()  # Freeze the teacher model
     student_model.train()
-    print("Training loop done")
+    print("--------> Training Start")
 
     num_epochs = cfg.epoch
     os.makedirs('checkpoints', exist_ok=True)
@@ -233,7 +291,6 @@ def main(use_gradient_guided=False):
 
     for epoch in range(num_epochs):
         # print("loop")
-        print(enumerate(train_loader))
         for batch_ndx, input_dict in enumerate(train_loader):
             # print("Loadding")
             # Move input data to device
@@ -255,7 +312,7 @@ def main(use_gradient_guided=False):
             # print("teacher model move done")
 
             # Forward pass through student model
-            student_seg_logits, student_latent_feature = student_model(input_dict) # teacher_latent_feature (N, 512)
+            student_seg_logits, student_latent_feature = student_model(input_dict) # student_latent_feature (N, 512)
             student_preds = torch.argmax(student_seg_logits, dim=1)
             student_iou_scores = compute_iou_all_classes(
                 student_preds,
@@ -331,18 +388,18 @@ def main(use_gradient_guided=False):
             total_student_loss.backward()
             student_optimizer.step()
 
-            # Log training loss
-            global_step = epoch * len(train_loader) + batch_ndx
-            writer.add_scalar('Loss/student', student_loss.item(), global_step)
-            writer.add_scalar('Loss/chamfer', chamfer_loss.item(), global_step)
-            writer.add_scalar('Loss/teacher', teacher_loss.item(), global_step)
-            writer.add_scalar('Loss/KLD', kld_loss.item(), global_step)
-
-            if use_gradient_guided:
-                writer.add_scalar('Loss/gradient_guided_loss', distillation_loss.item(), global_step)
-
-            writer.add_scalar('Metrics/student_mIoU', student_miou.item(), global_step)
-            writer.add_scalar('Metrics/teacher_mIoU', teacher_miou.item(), global_step)
+            # # Log training loss
+            # global_step = epoch * len(train_loader) + batch_ndx
+            # writer.add_scalar('Loss/student', student_loss.item(), global_step)
+            # writer.add_scalar('Loss/chamfer', chamfer_loss.item(), global_step)
+            # writer.add_scalar('Loss/teacher', teacher_loss.item(), global_step)
+            # writer.add_scalar('Loss/KLD', kld_loss.item(), global_step)
+            #
+            # if use_gradient_guided:
+            #     writer.add_scalar('Loss/gradient_guided_loss', distillation_loss.item(), global_step)
+            #
+            # writer.add_scalar('Metrics/student_mIoU', student_miou.item(), global_step)
+            # writer.add_scalar('Metrics/teacher_mIoU', teacher_miou.item(), global_step)
 
             # Print progress
             if batch_ndx % 10 == 0:
@@ -367,7 +424,7 @@ def main(use_gradient_guided=False):
             torch.save(student_model.state_dict(), checkpoint_path)
             print(f"Student model checkpoint saved at {checkpoint_path}")
 
-    writer.close()
+    # writer.close()
 
 
 

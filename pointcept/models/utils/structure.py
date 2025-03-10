@@ -128,6 +128,11 @@ class Point(Dict):
             sparse_shape = torch.add(
                 torch.max(self.grid_coord, dim=0).values, pad
             ).tolist()
+
+        # # Check device of batch and grid_coord and move to CUDA if needed
+        # self.batch = self.batch.cuda() if self.batch.is_cpu else self.batch
+        # self.grid_coord = self.grid_coord.cuda() if self.grid_coord.is_cpu else self.grid_coord
+
         sparse_conv_feat = spconv.SparseConvTensor(
             features=self.feat,
             indices=torch.cat(

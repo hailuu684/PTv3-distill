@@ -7,7 +7,7 @@ from pointcept.engines.defaults import default_config_parser, default_setup, wor
 from pointcept.utils import comm
 
 
-class PTv3_Dataloader():
+class PTv3_Dataloader:
     def __init__(self, cfg):
         self.cfg = cfg
         
@@ -15,7 +15,8 @@ class PTv3_Dataloader():
         self.init_fn = (
             partial(
                 worker_init_fn,
-                num_workers=self.cfg.num_worker_per_gpu,
+                # num_workers=self.cfg.num_worker_per_gpu,
+                num_workers=1,
                 rank=comm.get_rank(),
                 seed=self.cfg.seed,
             )
@@ -34,9 +35,9 @@ class PTv3_Dataloader():
         
         train_loader = torch.utils.data.DataLoader(
             self.train_data,
-            batch_size=self.cfg.batch_size_per_gpu,
+            batch_size=self.cfg.batch_size,
             shuffle=(self.train_sampler is None),
-            num_workers=self.cfg.num_worker_per_gpu,
+            num_workers=self.cfg.num_worker,
             sampler=self.train_sampler,
             collate_fn=partial(point_collate_fn, mix_prob=self.cfg.mix_prob),
             pin_memory=True,
@@ -57,11 +58,33 @@ class PTv3_Dataloader():
         
         val_loader = torch.utils.data.DataLoader(
             self.val_data,
-            batch_size=self.cfg.batch_size_val_per_gpu,
+            batch_size=self.cfg.batch_size_val,
             shuffle=False,
-            num_workers=self.cfg.num_worker_per_gpu,
+            num_workers=self.cfg.num_worker,
             pin_memory=True,
             sampler=self.val_sampler,
             collate_fn=collate_fn,
         )
         return val_loader
+
+    def load_test_data(self):
+
+        self.test_data = build_dataset(self.cfg.data.test)
+
+        # create validation dataset
+        if comm.get_world_size() > 1:
+            self.test_sampler = torch.utils.data.distributed.DistributedSampler(self.test_data)
+        else:
+            self.test_sampler = None
+
+        test_loader = torch.utils.data.DataLoader(
+            self.test_data,
+            batch_size=self.cfg.batch_size_test_per_gpu,
+            shuffle=False,
+            num_workers=self.cfg.num_worker,
+            pin_memory=True,
+            sampler=self.test_sampler,
+            collate_fn=collate_fn,
+        )
+
+        return test_loader

@@ -1,64 +1,82 @@
 import torch
-from torch.utils.tensorboard import SummaryWriter
+# from torch.utils.tensorboard import SummaryWriter
 from dataloader import PTv3_Dataloader
-from PTv3_model import PointTransformerV3, load_weights_ptv3_nucscenes_seg
+from PTv3_model import PointTransformerV3TrainTeacher, load_weights_ptv3_nucscenes_seg
 from pointcept.engines.defaults import default_config_parser, default_setup
 from pointcept.models.losses import build_criteria
 import os
+from gpu_main import compute_miou, compute_iou_all_classes
+from pointcept.engines import test
+import numpy as np
 
 # Pretrained model path and config file
-PRETRAINED_PATH = '/home/thomle/PTv3-distill/huggingface_model/PointTransformerV3/nuscenes-semseg-pt-v3m1-0-base/model/model_best.pth'
-CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-base.py"
+# PRETRAINED_PATH = './checkpoints/model_best.pth'
+PRETRAINED_PATH = './checkpoints/checkpoint_epoch_1.pth'
+CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-train-teacher.py"
+
+
+def get_teacher_model(cfg):
+    """
+    Load the teacher model and load the pretrained weights.
+
+    Returns:
+        PointTransformerV3: The teacher model.
+    """
+    model_config = cfg.model.backbone
+    return PointTransformerV3TrainTeacher(
+        in_channels=model_config.in_channels,
+        pdnorm_conditions=model_config.pdnorm_conditions,
+        cls_mode=model_config.cls_mode,
+        pdnorm_bn=model_config.pdnorm_bn,
+        mlp_ratio=model_config.mlp_ratio,
+        qkv_bias=model_config.qkv_bias,
+        enable_flash=model_config.enable_flash,
+        order=model_config.order,
+        stride=model_config.stride,
+        enc_depths=model_config.enc_depths,
+        enc_channels=model_config.enc_channels,
+        enc_num_head=model_config.enc_num_head,
+        enc_patch_size=model_config.enc_patch_size,
+        dec_depths=model_config.dec_depths,
+        dec_channels=model_config.dec_channels,
+        dec_num_head=model_config.dec_num_head,
+        dec_patch_size=model_config.dec_patch_size,
+        qk_scale=model_config.qk_scale,
+        attn_drop=model_config.attn_drop,
+        proj_drop=model_config.proj_drop,
+        drop_path=model_config.drop_path,
+        shuffle_orders=model_config.shuffle_orders,
+        pre_norm=model_config.pre_norm,
+        enable_rpe=model_config.enable_rpe,
+        upcast_attention=model_config.upcast_attention,
+        upcast_softmax=model_config.upcast_softmax,
+        pdnorm_ln=model_config.pdnorm_ln,
+        pdnorm_decouple=model_config.pdnorm_decouple,
+        pdnorm_adaptive=model_config.pdnorm_adaptive,
+        pdnorm_affine=model_config.pdnorm_affine
+    )
+
 
 
 def main():
+
     # Load configuration
     cfg = default_config_parser(CONFIG_FILE, None)
     cfg = default_setup(cfg)
 
     # Initialize TensorBoard
-    writer = SummaryWriter(log_dir='logs/ptv3_training')
+    # writer = SummaryWriter(log_dir='logs/ptv3_training')
 
-    # Load the model
-    model = PointTransformerV3(
-        in_channels=4,
-        pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo"),
-        cls_mode=False,
-        pdnorm_bn=False,
-        mlp_ratio=4,
-        qkv_bias=True,
-        enable_flash=False,
-        order=['z', 'z-trans', 'hilbert', 'hilbert-trans'],
-        stride=(2, 2, 2, 2),
-        enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
-        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
-        dec_depths=(2, 2, 2, 2),
-        dec_channels=(64, 64, 128, 256),
-        dec_num_head=(4, 4, 8, 16),
-        dec_patch_size=(1024, 1024, 1024, 1024),
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        drop_path=0.3,
-        shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        upcast_attention=False,
-        upcast_softmax=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True
-    )
+    # Load teacher model
+    teacher_model = get_teacher_model(cfg)
 
     # Load pretrained weights
-    load_weights_ptv3_nucscenes_seg(model, PRETRAINED_PATH)
+    model = load_weights_ptv3_nucscenes_seg(teacher_model, PRETRAINED_PATH)
 
     # Data load
     loader = PTv3_Dataloader(cfg)
     train_loader = loader.load_training_data()
+    # test_loader = loader.load_validation_data()
 
     # Move model to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -83,22 +101,49 @@ def main():
     )
 
     # Training loop
-    model.train()
     num_epochs = cfg.epoch
     os.makedirs('checkpoints', exist_ok=True)  # Ensure checkpoint directory exists
 
+    num_classes = len(cfg.names)  # Assuming cfg.names contains class names
+
+    # tester = test.CustomSemSegTester(cfg=cfg, model=model)
+    # test_loader = tester.test()
+
     for epoch in range(num_epochs):
         running_loss = 0.0
+
+        total_train_iou_scores = torch.zeros(num_classes, device=device)
+
+        # train
+        model.train()
+
+        print("-----> Training")
         for batch_ndx, input_dict in enumerate(train_loader):
             # Move input data to device
             input_dict = {k: v.to(device) for k, v in input_dict.items()}
 
             # Forward pass
             seg_logits = model(input_dict)
-            logits_tensor = seg_logits.get("feat", None)
+            # logits_tensor = seg_logits.get("feat", None)
+            logits_tensor = seg_logits
 
             # Compute loss
             loss = criteria(logits_tensor, input_dict["segment"])
+
+            # Compute IoU
+            ground_truth = input_dict["segment"]
+
+            # print(logits_tensor.shape)
+            # print(ground_truth.shape)
+            with torch.no_grad():
+                teacher_preds = torch.argmax(seg_logits, dim=1)
+                teacher_iou_scores = compute_iou_all_classes(
+                    teacher_preds,
+                    ground_truth,
+                    num_classes
+                )
+                # teacher_miou = compute_miou(teacher_iou_scores)
+                total_train_iou_scores += teacher_iou_scores
 
             # Backward pass
             optimizer.zero_grad()
@@ -109,10 +154,10 @@ def main():
             running_loss += loss.item()
 
             # Log loss to TensorBoard
-            writer.add_scalar('Loss/train', loss.item(), epoch * len(train_loader) + batch_ndx)
+            # writer.add_scalar('Loss/train', loss.item(), epoch * len(train_loader) + batch_ndx)
 
             # Print progress every 10 batches
-            if batch_ndx % 10 == 0:
+            if batch_ndx % 30 == 0:
                 print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_ndx}/{len(train_loader)}], Loss: {loss.item():.4f}")
 
         # Step the scheduler
@@ -120,8 +165,9 @@ def main():
 
         # Print epoch loss and log to TensorBoard
         avg_loss = running_loss / len(train_loader)
-        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {avg_loss:.4f}")
-        writer.add_scalar('Loss/epoch_avg', avg_loss, epoch + 1)
+        train_miou = compute_miou(total_train_iou_scores / len(train_loader))
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Average Loss: {avg_loss:.4f}, mIoU: {train_miou:.4f}")
+        # writer.add_scalar('Loss/epoch_avg', avg_loss, epoch + 1)
 
         # Save checkpoints
         if (epoch + 1) % cfg.eval_epoch == 0 or (epoch + 1) == num_epochs:
@@ -129,46 +175,18 @@ def main():
             torch.save(model.state_dict(), checkpoint_path)
             print(f"Model checkpoint saved at {checkpoint_path}")
 
-    writer.close()
+        # ====================== TEST EVALUATION ======================
+
+        print("---------> Testing")
+
+        tester = test.CustomSemSegTester(cfg=cfg, model=model)
+        tester.test()
 
 
-def student_models():
-
-    student_model = PointTransformerV3(
-        in_channels=4,
-        pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo"),
-        cls_mode=False,
-        pdnorm_bn=False,
-        mlp_ratio=2,  # Reduced from 4 to 2
-        qkv_bias=True,
-        enable_flash=False,
-        order=['z', 'z-trans', 'hilbert', 'hilbert-trans'],
-        stride=(2, 2, 2, 2),
-        enc_depths=(1, 1, 1, 3, 1),  # Reduced depth from (2, 2, 2, 6, 2)
-        enc_channels=(16, 32, 64, 128, 256),  # Reduced number of channels
-        enc_num_head=(1, 2, 4, 8, 16),  # Reduced number of attention heads
-        enc_patch_size=(512, 512, 512, 512, 512),  # Smaller patch sizes
-        dec_depths=(1, 1, 1, 1),  # Reduced decoder depth
-        dec_channels=(32, 32, 64, 128),  # Reduced decoder channels
-        dec_num_head=(2, 2, 4, 8),  # Reduced decoder attention heads
-        dec_patch_size=(512, 512, 512, 512),  # Smaller patch sizes
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        drop_path=0.1,  # Reduced drop path rate
-        shuffle_orders=True,
-        pre_norm=True,
-        enable_rpe=False,
-        upcast_attention=False,
-        upcast_softmax=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True
-    )
-
-    return student_model
-
+    # # writer.close()
 
 if __name__ == "__main__":
     main()
+
+    # python main.py
+

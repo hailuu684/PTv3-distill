@@ -16,6 +16,7 @@ from timm.models.layers import DropPath
 
 try:
     import flash_attn
+
 except ImportError:
     flash_attn = None
 
