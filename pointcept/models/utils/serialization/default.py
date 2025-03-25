@@ -7,6 +7,7 @@ from .hilbert import decode as hilbert_decode_
 
 @torch.inference_mode()
 def encode(grid_coord, batch=None, depth=16, order="z"):
+    # print("Current order:", order)
     assert order in {"z", "z-trans", "hilbert", "hilbert-trans"}
     if order == "z":
         code = z_order_encode(grid_coord, depth=depth)

@@ -41,7 +41,7 @@ module load shared rc-base CUDA/11.8.0
 module load shared rc-base cuDNN/8.9.2.26-CUDA-11.8.0
 
 # to install, load gcc 8.2.0
-module load GCC/8.2.0
+module load GCC/8.2.0-2.31.1
 
 conda install ninja -y
 

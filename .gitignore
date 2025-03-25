@@ -180,3 +180,4 @@ outputs/
 **/*.out
 Dockerfile
 libs/
+terminal_logs/

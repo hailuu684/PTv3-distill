@@ -8,11 +8,14 @@ import os
 from gpu_main import compute_miou, compute_iou_all_classes
 from pointcept.engines import test
 import numpy as np
+import datetime
+import sys
+
 
 # Pretrained model path and config file
 # PRETRAINED_PATH = './checkpoints/model_best.pth'
-PRETRAINED_PATH = './checkpoints/checkpoint_epoch_1.pth'
-CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-train-teacher.py"
+# PRETRAINED_PATH = './checkpoints/checkpoint_epoch_1.pth'
+CONFIG_FILE = "configs/semantic_kitti/kitti_v3.py"
 
 
 def get_teacher_model(cfg):
@@ -53,7 +56,8 @@ def get_teacher_model(cfg):
         pdnorm_ln=model_config.pdnorm_ln,
         pdnorm_decouple=model_config.pdnorm_decouple,
         pdnorm_adaptive=model_config.pdnorm_adaptive,
-        pdnorm_affine=model_config.pdnorm_affine
+        pdnorm_affine=model_config.pdnorm_affine,
+        num_classes=cfg.model.num_classes
     )
 
 
@@ -68,10 +72,10 @@ def main():
     # writer = SummaryWriter(log_dir='logs/ptv3_training')
 
     # Load teacher model
-    teacher_model = get_teacher_model(cfg)
+    model = get_teacher_model(cfg)
 
     # Load pretrained weights
-    model = load_weights_ptv3_nucscenes_seg(teacher_model, PRETRAINED_PATH)
+    # model = load_weights_ptv3_nucscenes_seg(teacher_model, PRETRAINED_PATH)
 
     # Data load
     loader = PTv3_Dataloader(cfg)
@@ -87,7 +91,10 @@ def main():
 
     # Optimizer and Scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.optimizer.lr, weight_decay=cfg.optimizer.weight_decay)
-    max_lr = cfg.scheduler.max_lr[0]  # Single value for max_lr
+    # max_lr = cfg.scheduler.max_lr[0]  # Single value for max_lr
+    ## ding changed
+    max_lr = cfg.scheduler.max_lr  # Single value for max_lr
+
 
     # Scheduler setup
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
@@ -158,7 +165,10 @@ def main():
 
             # Print progress every 10 batches
             if batch_ndx % 30 == 0:
-                print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_ndx}/{len(train_loader)}], Loss: {loss.item():.4f}")
+                current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                # print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_ndx}/{len(train_loader)}], Loss: {loss.item():.4f}")
+                print(f"{current_time} - Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_ndx}/{len(train_loader)}], Loss: {loss.item():.4f}")
+                sys.stdout.flush()
 
         # Step the scheduler
         scheduler.step()

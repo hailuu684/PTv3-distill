@@ -557,7 +557,8 @@ class PointTransformerV3(PointModule):
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
         context_channels=256,
         backbone_out_channels=64,
-        num_classes=16
+        # num_classes=16
+        num_classes=19 #### ding: 19 is for kitti dataset
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -842,7 +843,8 @@ class PointTransformerV3TrainTeacher(PointModule):
         pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
         context_channels=256,
         backbone_out_channels=64,
-        num_classes=16
+        # num_classes=16
+        num_classes=19 ### ding: 19 is for kitti dataset
     ):
         super().__init__()
         self.num_stages = len(enc_depths)
@@ -850,6 +852,10 @@ class PointTransformerV3TrainTeacher(PointModule):
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # print(1111111111111111111)
+        # print(self.num_stages)
+        # print(2222222222222222222)
+        # print(len(stride) + 1)
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
