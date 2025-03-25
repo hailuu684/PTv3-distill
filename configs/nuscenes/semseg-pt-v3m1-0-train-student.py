@@ -1,9 +1,9 @@
-weight = '/home/luutunghai@gmail.com/projects/PTv3-distill/checkpoints/model_last.pth'
+weight = None
 resume = False
 evaluate = True
 test_only = False
 seed = 28024989
-save_path = 'exp/nuscenes/semseg-pt-v3m1-0-train-teacher'
+save_path = 'exp/nuscenes/semseg-pt-v3m1-0-train-student'
 miou_result_path = f"/home/luutunghai@gmail.com/projects/PTv3-distill/{save_path}/miou_result"
 
 num_worker = 1
@@ -33,24 +33,24 @@ model = dict(
     num_classes=16,
     backbone_out_channels=64,
     backbone=dict(
-        type='PT-v3m1',
+        type="PT-v3m1",
         in_channels=4,
-        order=['z', 'z-trans', 'hilbert', 'hilbert-trans'],
+        order=["z", "z-trans", "hilbert", "hilbert-trans"],
         stride=(2, 2, 2, 2),
-        enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
-        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
-        dec_depths=(2, 2, 2, 2),
-        dec_channels=(64, 64, 128, 256),
-        dec_num_head=(4, 4, 8, 16),
+        enc_depths=(1, 1, 1, 2, 1),  # 20% of the teacher's depths
+        enc_channels=(16, 16, 32, 64, 128),  # Reduced channels
+        enc_num_head=(1, 1, 2, 4, 8),  # Reduced number of attention heads
+        enc_patch_size=(1024, 1024, 1024, 1024, 1024),  # (1024, 1024, 1024, 1024, 1024)
+        dec_depths=(1, 1, 1, 1),  # Reduced decoder depths
+        dec_channels=(64, 64, 128, 128),
+        dec_num_head=(2, 2, 4, 8),  # Reduced decoder attention heads
         dec_patch_size=(1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
         qk_scale=None,
         attn_drop=0.0,
         proj_drop=0.0,
-        drop_path=0.3,
+        drop_path=0.15,
         shuffle_orders=True,
         pre_norm=True,
         enable_rpe=False,
@@ -63,7 +63,7 @@ model = dict(
         pdnorm_decouple=True,
         pdnorm_adaptive=False,
         pdnorm_affine=True,
-        pdnorm_conditions=('nuScenes', 'SemanticKITTI', 'Waymo')),
+        pdnorm_conditions=("nuScenes", "SemanticKITTI", "Waymo")),
     criteria=[
         dict(type='CrossEntropyLoss', loss_weight=1.0, ignore_index=-1),
         dict(
@@ -179,10 +179,9 @@ data = dict(
                     feat_keys=('coord', 'strength'))
             ],
             aug_transform=[
-                [dict(type="RandomRotateTargetAngle", angle=[0], axis="z", center=[0, 0, 0], p=1)]
-                           ]),
+                    [dict(type="RandomRotateTargetAngle", angle=[0], axis="z", center=[0, 0, 0], p=1)]
+            ]),
         ignore_index=-1))
-
 
 """
 Turn off TTA by:

@@ -17,6 +17,9 @@ from torch_scatter import segment_csr  # import like this, not using torch_scatt
 from timm.models.layers import DropPath
 from collections import OrderedDict
 import ripserplusplus as rpp_py
+import time
+from loguru import logger as custom_logger
+
 # from ripser import ripser
 try:
     import flash_attn
@@ -30,6 +33,7 @@ from pointcept.models.utils.structure import Point
 import pointcept.utils.comm as comm
 from pointcept.models.modules import PointModule, PointSequential
 from spconv.pytorch import SparseConvTensor
+from fvcore.nn import FlopCountAnalysis
 
 
 class RPE(torch.nn.Module):
@@ -762,49 +766,6 @@ class PointTransformerV3(PointModule):
 
         return seg_logits, TDA_latent_feature
 
-    def viz_persistent_homology(self, data_dict):
-
-        point = Point(data_dict)
-
-        point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
-        point.sparsify()
-
-        # ✅ Move all tensors inside `Point` to CUDA
-        for key, value in point.items():
-            if isinstance(value, torch.Tensor):
-                point[key] = value.cuda()
-            elif isinstance(value, spconv.SparseConvTensor):
-                # Move SparseConvTensor components to CUDA
-                point[key] = spconv.SparseConvTensor(
-                    features=value.features.cuda(),
-                    indices=value.indices.cuda(),
-                    spatial_shape=value.spatial_shape,
-                    batch_size=value.batch_size
-                )
-
-        point = self.embedding(point)
-        # print("Latent space after embedding:", point.feat.shape)
-        point = self.enc(point)
-
-        latent_space = np.rot90(point.feat.cpu().detach().numpy())
-
-        print("--> Processing ripser++")
-        pe_latent_space = rpp_py.run("--format point-cloud --dim 2 --sparse", latent_space)
-        TDA_latent_feature = [torch.tensor(np.array(value.tolist())).to(self.device) for key, value in
-                              sorted(pe_latent_space.items())]
-
-        np.save("./figures/ripser++_point_feat.npy", point.feat.cpu().detach().numpy())
-        np.save("./figures/ripser++_TDA_latent_feature.npy", pe_latent_space)
-
-        print("--> Processing ripser")
-        # Compute persistent homology on the reduced data
-        diagrams = ripser(latent_space, metric="euclidean", maxdim=2)['dgms']
-
-        # Save the entire diagrams dictionary
-        np.save('./figures/ripser_persistence_diagram.npy', diagrams)
-
-        return TDA_latent_feature
-
 
 @MODELS.register_module("PT-v3-train-teacher")
 class PointTransformerV3TrainTeacher(PointModule):
@@ -1001,12 +962,19 @@ class PointTransformerV3TrainTeacher(PointModule):
         #     torch.tensor([0], device=data_dict["coord"].device)
         # )
         #
-        # data_dict["context"] = context # --> might be helpful here
+        # data_dict["context"] = context  # --> might be helpful here
 
+        # Step 1: Preprocessing, Serialization and Sparsification
+        # preprocessing_start = time.time()
         point = Point(data_dict)
+        # preprocessing_time = time.time() - preprocessing_start
+        # custom_logger.info(f"Preprocessing time: {preprocessing_time}")
 
+        # serialization_start = time.time()
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
+        # serialization_time = time.time() - serialization_start
+        # custom_logger.info(f"Serialization time: {serialization_time}")
 
         # ✅ Move all tensors inside `Point` to CUDA
         for key, value in point.items():
@@ -1024,6 +992,12 @@ class PointTransformerV3TrainTeacher(PointModule):
         point = self.embedding(point)
         # print("Latent space after embedding:", point.feat.shape)
         point = self.enc(point)
+
+        # Test FLOPS
+        flops = FlopCountAnalysis(self.enc, point)
+        total_flops = flops.total()
+        print(f"Total FLOPs: {total_flops / 1e9:.2f} GFLOPs")
+        print(flops.by_module())  # Breakdown by module
 
         if not self.cls_mode:
             point = self.dec(point)
@@ -1057,31 +1031,45 @@ def move_dict_to_cuda(data_dict):
     return point
 
 
-
 def load_weights_ptv3_nucscenes_seg(model, checkpoint_path):
     # Load the checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-    
-    # print(f"Checkpoint loaded from: {checkpoint_path}")
-    # print(f"Checkpoint keys: {checkpoint.keys()}")
-    
-    # Since there's no 'state_dict', we assume the model's weights are at the top level
-    # Create a new state dict to match the model's parameter names
-    model_state_dict = model.state_dict()
+    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cuda'))
 
-    # Adjust the checkpoint weights to match model's state_dict keys
-    # We assume that the checkpoint weights directly correspond to model layers
-    adjusted_state_dict = {}
-    
-    for key, value in checkpoint.items():
-        # If the model and checkpoint keys align, add them
-        if key in model_state_dict:
-            adjusted_state_dict[key] = value
-        else:
-            print(f"Warning: Key '{key}' not found in model state_dict.")
+    try:
+        weight = OrderedDict()
+        for key, value in checkpoint["state_dict"].items():
+            if key.startswith("backbone."): # backbone module
+                if comm.get_world_size() == 1:
+                    key = key[9:]  # module.xxx.xxx -> xxx.xxx
 
-    # Load the adjusted state dict into the model
-    model.load_state_dict(adjusted_state_dict, strict=False)
+            elif key.startswith("module."):
+                if comm.get_world_size() == 1:
+                    key = key[7:]  # module.xxx.xxx -> xxx.xxx
 
-    print("Model weights loaded successfully.")
+            else:
+                if comm.get_world_size() > 1:
+                    key = "module." + key  # xxx.xxx -> module.xxx.xxx
+            weight[key] = value
+        model.load_state_dict(weight, strict=False) # embedding table cannot be loaded but it is okay
+        print("Model weights loaded successfully.")
+
+    except:
+
+        model_state_dict = model.state_dict()
+
+        # Adjust the checkpoint weights to match model's state_dict keys
+        # We assume that the checkpoint weights directly correspond to model layers
+        adjusted_state_dict = {}
+
+        for key, value in checkpoint.items():
+            # If the model and checkpoint keys align, add them
+            if key in model_state_dict:
+                adjusted_state_dict[key] = value
+            else:
+                print(f"Warning: Key '{key}' not found in model state_dict.")
+
+        # Load the adjusted state dict into the model
+        model.load_state_dict(adjusted_state_dict, strict=True)
+
     return model
+
