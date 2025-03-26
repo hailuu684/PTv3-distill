@@ -4,7 +4,7 @@
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=2
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 ############# SBATCH --gpus-per-node=2
 #SBATCH --mem=128G
 #SBATCH --partition=amperenodes
@@ -17,17 +17,25 @@
 # wget https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_velodyne.zip
 # wget https://s3.eu-central-1.amazonaws.com/avg-kitti/data_odometry_calib.zip
 # wget https://www.semantic-kitti.org/assets/data_odometry_labels.zip
-# srun --ntasks=1 --mem=128G --partition=amperenodes --gres=gpu:1 --time=03:00:00 --pty /bin/bash
+# srun --ntasks=1 --mem=128G --partition=amperenodes --gres=gpu:2 --time=03:00:00 --pty /bin/bash
 
 
 module load Anaconda3/2022.05
 module load shared rc-base CUDA/11.8.0
 module load shared rc-base cuDNN/8.9.2.26-CUDA-11.8.0
-module load GCC/11.2.0
+module load GCC/12.2.0
+## GCC/11.2.0 old
 conda activate ptv3_3
+export NCCL_DEBUG=INFO
+export NCCL_P2P_DISABLE=1
+export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
 
-python main.py
+export PYTHONPATH=./
+python tools/train.py --config-file configs/semantic_kitti/kitti_v3.py --num-gpus 2 --options save_path=exp/dataset_type/semseg-pt-v3m1-0-train-teacher
+
+
+# python main.py
 
 ######## ssh dingz@bgsu.edu@cheaha.rc.uab.edu
 # module load Anaconda3/2022.05

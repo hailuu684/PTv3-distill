@@ -3,15 +3,15 @@ resume = False
 evaluate = True
 test_only = False
 seed = 28024989
-save_path = 'exp/dataset_type/semseg-pt-v3m1-0-train-teacher'
+save_path = 'exp/dataset_type/kitti/semseg-pt-v3m1-0-train-teacher'
 miou_result_path = f"/home/dingz@bgsu.edu/ptv3/ptv3_distill/PTv3-distill/{save_path}/miou_result"
 
-num_worker = 1
-batch_size = 8  # takes 79 Gb RAMs on A100
-batch_size_val = 8
-batch_size_test = 1
+num_worker = 2 #run on muti gpu
+batch_size = 24  # takes 79 Gb RAMs on A100
+batch_size_val = 24
+batch_size_test = None
 epoch = 50
-eval_epoch = 1
+eval_epoch = 50
 ##############1
 clip_grad = None
 sync_bn = False
@@ -22,7 +22,7 @@ empty_cache = False
 ###########1
 empty_cache_per_epoch = False
 ###########2
-find_unused_parameters = False
+find_unused_parameters = True
 mix_prob = 0.8
 param_dicts = [dict(keyword='block', lr=0.0002)]
 
@@ -135,7 +135,8 @@ data = dict(
     names=names,
     train=dict(
         type=dataset_type,
-        split=["train", "val"],
+        # split=["train", "val"],
+        split="train",
         data_root=data_root,
         transform=[
             dict(

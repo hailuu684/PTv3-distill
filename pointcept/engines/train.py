@@ -143,12 +143,15 @@ class Trainer(TrainerBase):
         self.scaler = self.build_scaler()
         self.logger.info("=> Building hooks ...")
         self.register_hooks(self.cfg.hooks)
+        # print("=== Effective Config ===")
+        # print(cfg)
 
     def train(self):
         with EventStorage() as self.storage, ExceptionWriter():
             # => before train
             self.before_train()
             self.logger.info(">>>>>>>>>>>>>>>> Start Training >>>>>>>>>>>>>>>>")
+            self.logger.info(f"[debugging] training max_epoch = {self.max_epoch}")
             for self.epoch in range(self.start_epoch, self.max_epoch):
                 # => before epoch
                 # TODO: optimize to iteration based
