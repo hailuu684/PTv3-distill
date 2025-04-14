@@ -1,6 +1,5 @@
 """
 Point Transformer - V3 Mode1
-
 Author: Xiaoyang Wu (xiaoyang.wu.cs@gmail.com)
 Please cite our work if the code is helpful to you.
 """
@@ -12,15 +11,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 import spconv.pytorch as spconv
-# import torch_scatter
-from torch_scatter import segment_csr  # import like this, not using torch_scatter.segment_csr
+from torch_scatter import segment_csr
 from timm.models.layers import DropPath
 from collections import OrderedDict
 # import ripserplusplus as rpp_py
 import time
 from loguru import logger as custom_logger
 
-# from ripser import ripser
 try:
     import flash_attn
 except ImportError:
@@ -33,7 +30,8 @@ from pointcept.models.utils.structure import Point
 import pointcept.utils.comm as comm
 from pointcept.models.modules import PointModule, PointSequential
 from spconv.pytorch import SparseConvTensor
-from fvcore.nn import FlopCountAnalysis
+from fvcore.nn import FlopCountAnalysis, flop_count_table
+import copy
 
 
 class RPE(torch.nn.Module):
@@ -525,249 +523,7 @@ class Embedding(PointModule):
         return point
 
 
-@MODELS.register_module("PT-v3-teacher")
-class PointTransformerV3(PointModule):
-    def __init__(
-        self,
-        in_channels=6,
-        order=("z", "z-trans"),
-        stride=(2, 2, 2, 2),
-        enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
-        enc_patch_size=(48, 48, 48, 48, 48),
-        dec_depths=(2, 2, 2, 2),
-        dec_channels=(64, 64, 128, 256),
-        dec_num_head=(4, 4, 8, 16),
-        dec_patch_size=(48, 48, 48, 48),
-        mlp_ratio=4,
-        qkv_bias=True,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        drop_path=0.3,
-        pre_norm=True,
-        shuffle_orders=True,
-        enable_rpe=False,
-        enable_flash=True,
-        upcast_attention=False,
-        upcast_softmax=False,
-        cls_mode=False,
-        pdnorm_bn=False,
-        pdnorm_ln=False,
-        pdnorm_decouple=True,
-        pdnorm_adaptive=False,
-        pdnorm_affine=True,
-        pdnorm_conditions=("ScanNet", "S3DIS", "Structured3D"),
-        context_channels=256,
-        backbone_out_channels=64,
-        num_classes=16
-    ):
-        super().__init__()
-        self.num_stages = len(enc_depths)
-        self.order = [order] if isinstance(order, str) else order
-        self.cls_mode = cls_mode
-        self.shuffle_orders = shuffle_orders
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-        assert self.num_stages == len(stride) + 1
-        assert self.num_stages == len(enc_depths)
-        assert self.num_stages == len(enc_channels)
-        assert self.num_stages == len(enc_num_head)
-        assert self.num_stages == len(enc_patch_size)
-        assert self.cls_mode or self.num_stages == len(dec_depths) + 1
-        assert self.cls_mode or self.num_stages == len(dec_channels) + 1
-        assert self.cls_mode or self.num_stages == len(dec_num_head) + 1
-        assert self.cls_mode or self.num_stages == len(dec_patch_size) + 1
-
-        # norm layers
-        if pdnorm_bn:
-            bn_layer = partial(
-                PDNorm,
-                norm_layer=partial(
-                    nn.BatchNorm1d, eps=1e-3, momentum=0.01, affine=pdnorm_affine
-                ),
-                conditions=pdnorm_conditions,
-                decouple=pdnorm_decouple,
-                adaptive=pdnorm_adaptive,
-            )
-        else:
-            bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)
-        if pdnorm_ln:
-            ln_layer = partial(
-                PDNorm,
-                norm_layer=partial(nn.LayerNorm, elementwise_affine=pdnorm_affine),
-                conditions=pdnorm_conditions,
-                decouple=pdnorm_decouple,
-                adaptive=pdnorm_adaptive,
-            )
-        else:
-            ln_layer = nn.LayerNorm
-        # activation layers
-        act_layer = nn.GELU
-
-        self.conditions = pdnorm_conditions
-        self.embedding_table = nn.Embedding(len(pdnorm_conditions), context_channels)
-        self.seg_head = nn.Linear(backbone_out_channels, num_classes)
-
-        self.embedding = Embedding(
-            in_channels=in_channels,
-            embed_channels=enc_channels[0],
-            norm_layer=bn_layer,
-            act_layer=act_layer,
-        )
-
-        # encoder
-        enc_drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))
-        ]
-        self.enc = PointSequential()
-        for s in range(self.num_stages):
-            enc_drop_path_ = enc_drop_path[
-                sum(enc_depths[:s]) : sum(enc_depths[: s + 1])
-            ]
-            enc = PointSequential()
-            if s > 0:
-                enc.add(
-                    SerializedPooling(
-                        in_channels=enc_channels[s - 1],
-                        out_channels=enc_channels[s],
-                        stride=stride[s - 1],
-                        norm_layer=bn_layer,
-                        act_layer=act_layer,
-                    ),
-                    name="down",
-                )
-            for i in range(enc_depths[s]):
-                enc.add(
-                    Block(
-                        channels=enc_channels[s],
-                        num_heads=enc_num_head[s],
-                        patch_size=enc_patch_size[s],
-                        mlp_ratio=mlp_ratio,
-                        qkv_bias=qkv_bias,
-                        qk_scale=qk_scale,
-                        attn_drop=attn_drop,
-                        proj_drop=proj_drop,
-                        drop_path=enc_drop_path_[i],
-                        norm_layer=ln_layer,
-                        act_layer=act_layer,
-                        pre_norm=pre_norm,
-                        order_index=i % len(self.order),
-                        cpe_indice_key=f"stage{s}",
-                        enable_rpe=enable_rpe,
-                        enable_flash=enable_flash,
-                        upcast_attention=upcast_attention,
-                        upcast_softmax=upcast_softmax,
-                    ),
-                    name=f"block{i}",
-                )
-            if len(enc) != 0:
-                self.enc.add(module=enc, name=f"enc{s}")
-
-        # decoder
-        if not self.cls_mode:
-            dec_drop_path = [
-                x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
-            ]
-            self.dec = PointSequential()
-            dec_channels = list(dec_channels) + [enc_channels[-1]]
-            for s in reversed(range(self.num_stages - 1)):
-                dec_drop_path_ = dec_drop_path[
-                    sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
-                ]
-                dec_drop_path_.reverse()
-                dec = PointSequential()
-                dec.add(
-                    SerializedUnpooling(
-                        in_channels=dec_channels[s + 1],
-                        skip_channels=enc_channels[s],
-                        out_channels=dec_channels[s],
-                        norm_layer=bn_layer,
-                        act_layer=act_layer,
-                    ),
-                    name="up",
-                )
-                for i in range(dec_depths[s]):
-                    dec.add(
-                        Block(
-                            channels=dec_channels[s],
-                            num_heads=dec_num_head[s],
-                            patch_size=dec_patch_size[s],
-                            mlp_ratio=mlp_ratio,
-                            qkv_bias=qkv_bias,
-                            qk_scale=qk_scale,
-                            attn_drop=attn_drop,
-                            proj_drop=proj_drop,
-                            drop_path=dec_drop_path_[i],
-                            norm_layer=ln_layer,
-                            act_layer=act_layer,
-                            pre_norm=pre_norm,
-                            order_index=i % len(self.order),
-                            cpe_indice_key=f"stage{s}",
-                            enable_rpe=enable_rpe,
-                            enable_flash=enable_flash,
-                            upcast_attention=upcast_attention,
-                            upcast_softmax=upcast_softmax,
-                        ),
-                        name=f"block{i}",
-                    )
-                self.dec.add(module=dec, name=f"dec{s}")
-
-    def forward(self, data_dict):
-
-        # context = self.embedding_table(
-        #     torch.tensor([0], device=data_dict["coord"].device)
-        # )
-        #
-        # data_dict["context"] = context # --> might be helpful here
-
-        point = Point(data_dict)
-
-        point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
-        point.sparsify()
-
-        # ✅ Move all tensors inside `Point` to CUDA
-        for key, value in point.items():
-            if isinstance(value, torch.Tensor):
-                point[key] = value.cuda()
-            elif isinstance(value, spconv.SparseConvTensor):
-                # Move SparseConvTensor components to CUDA
-                point[key] = spconv.SparseConvTensor(
-                    features=value.features.cuda(),
-                    indices=value.indices.cuda(),
-                    spatial_shape=value.spatial_shape,
-                    batch_size=value.batch_size
-                )
-
-        point = self.embedding(point)
-        # print("Latent space after embedding:", point.feat.shape)
-        point = self.enc(point)
-        # for idx, stage in enumerate(self.enc):
-        #     point = stage(point)
-        #     print(f"Latent space after encoder stage {idx}:", point.feat.shape)
-        # print("Final latent space before decoder:", point.feat.shape)
-        # import numpy as np
-        # np.save("./point_feat.npy", point.feat.cpu().detach().numpy())
-        latent_space = np.rot90(point.feat.cpu().detach().numpy())
-        pe_latent_space = rpp_py.run("--format point-cloud --dim 2 --sparse", latent_space)
-        TDA_latent_feature = [torch.tensor(np.array(value.tolist())).to(self.device) for key, value in sorted(pe_latent_space.items())]
-
-        if not self.cls_mode:
-            point = self.dec(point)
-        else:
-            point.feat = segment_csr(
-                src=point.feat,
-                indptr=nn.functional.pad(point.offset, (1, 0)),
-                reduce="mean",
-            )
-
-        seg_logits = self.seg_head(point.feat)
-
-        return seg_logits, TDA_latent_feature
-
-
-@MODELS.register_module("PT-v3-train-teacher")
+@MODELS.register_module("PT-v3-calculate-gflops")
 class PointTransformerV3TrainTeacher(PointModule):
     def __init__(
         self,
@@ -826,9 +582,7 @@ class PointTransformerV3TrainTeacher(PointModule):
         if pdnorm_bn:
             bn_layer = partial(
                 PDNorm,
-                norm_layer=partial(
-                    nn.BatchNorm1d, eps=1e-3, momentum=0.01, affine=pdnorm_affine
-                ),
+                norm_layer=partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01, affine=pdnorm_affine),
                 conditions=pdnorm_conditions,
                 decouple=pdnorm_decouple,
                 adaptive=pdnorm_adaptive,
@@ -845,7 +599,6 @@ class PointTransformerV3TrainTeacher(PointModule):
             )
         else:
             ln_layer = nn.LayerNorm
-        # activation layers
         act_layer = nn.GELU
 
         self.conditions = pdnorm_conditions
@@ -860,14 +613,10 @@ class PointTransformerV3TrainTeacher(PointModule):
         )
 
         # encoder
-        enc_drop_path = [
-            x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))
-        ]
+        enc_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(enc_depths))]
         self.enc = PointSequential()
         for s in range(self.num_stages):
-            enc_drop_path_ = enc_drop_path[
-                sum(enc_depths[:s]) : sum(enc_depths[: s + 1])
-            ]
+            enc_drop_path_ = enc_drop_path[sum(enc_depths[:s]):sum(enc_depths[:s + 1])]
             enc = PointSequential()
             if s > 0:
                 enc.add(
@@ -909,15 +658,11 @@ class PointTransformerV3TrainTeacher(PointModule):
 
         # decoder
         if not self.cls_mode:
-            dec_drop_path = [
-                x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))
-            ]
+            dec_drop_path = [x.item() for x in torch.linspace(0, drop_path, sum(dec_depths))]
             self.dec = PointSequential()
             dec_channels = list(dec_channels) + [enc_channels[-1]]
             for s in reversed(range(self.num_stages - 1)):
-                dec_drop_path_ = dec_drop_path[
-                    sum(dec_depths[:s]) : sum(dec_depths[: s + 1])
-                ]
+                dec_drop_path_ = dec_drop_path[sum(dec_depths[:s]):sum(dec_depths[:s + 1])]
                 dec_drop_path_.reverse()
                 dec = PointSequential()
                 dec.add(
@@ -956,32 +701,176 @@ class PointTransformerV3TrainTeacher(PointModule):
                     )
                 self.dec.add(module=dec, name=f"dec{s}")
 
+    def calculate_flops(self, point):
+        """Calculate FLOPs for each part of the model."""
+        flops_dict = {
+            "Embedding": 0.0,
+            "Encoder": {},
+            "Decoder": {},
+            "Segmentation Head": 0.0,
+            "Total": 0.0
+        }
+
+        # Helper function to create a deep copy of a Point object
+        def copy_point(point):
+            new_point = Point()
+            for key, value in point.items():
+                if isinstance(value, torch.Tensor):
+                    new_point[key] = value.clone().detach()
+                elif isinstance(value, spconv.SparseConvTensor):
+                    new_point[key] = spconv.SparseConvTensor(
+                        features=value.features.clone().detach(),
+                        indices=value.indices.clone().detach(),
+                        spatial_shape=value.spatial_shape,
+                        batch_size=value.batch_size
+                    )
+                elif isinstance(value, (list, tuple)):
+                    new_point[key] = [v.clone().detach() if isinstance(v, torch.Tensor) else v for v in value]
+                else:
+                    new_point[key] = copy.deepcopy(value)
+            return new_point
+
+        # Helper function to compute FLOPs for dense operations only
+        def compute_dense_flops(module, input_data, name):
+            if isinstance(module, (nn.Linear, nn.LayerNorm, nn.Dropout, DropPath)):
+                try:
+                    flops = FlopCountAnalysis(module, input_data)
+                    total_flops = flops.total() / 1e9  # Convert to GFLOPs
+                    # custom_logger.info(f"FLOPs for {name}: {total_flops:.2f} GFLOPs")
+                    return total_flops
+                except Exception as e:
+                    custom_logger.warning(f"Failed to compute FLOPs for {name}: {str(e)}")
+                    return 0.0
+            elif isinstance(module, spconv.SubMConv3d):
+                in_channels = module.in_channels
+                out_channels = module.out_channels
+                kernel_size = module.kernel_size[0] ** 3
+                num_points = input_data.features.shape[0]
+                flops = 2 * in_channels * out_channels * kernel_size * num_points / 1e9
+                # custom_logger.info(f"Approximated FLOPs for {name} (sparse conv): {flops:.2f} GFLOPs")
+                return flops
+            return 0.0
+
+        # Embedding FLOPs
+        point_copy = copy_point(point)
+        point_copy = self.embedding(point_copy)  # Transform feat to enc_channels[0]
+        for name, module in self.embedding.stem.named_modules():
+            if name == "conv":
+                flops_dict["Embedding"] += compute_dense_flops(module, point.sparse_conv_feat, "Embedding.conv")
+            elif name in ["norm", "act"]:
+                flops_dict["Embedding"] += compute_dense_flops(module, point_copy.feat, f"Embedding.{name}")
+        flops_dict["Total"] += flops_dict["Embedding"]
+
+        # Encoder FLOPs
+        point_copy_enc = copy_point(point_copy)  # Start with embedded output
+        for stage_name, stage in self.enc.named_children():
+            flops_dict["Encoder"][stage_name] = {"Pooling": 0.0, "Blocks": {}}
+            point_copy_stage = copy_point(point_copy_enc)
+            for module_name, module in stage.named_children():
+                if module_name == "down":  # Pooling
+                    flops = compute_dense_flops(module.proj, point_copy_stage.feat, f"{stage_name}.Pooling.proj")
+                    flops_dict["Encoder"][stage_name]["Pooling"] += flops
+                    point_copy_stage = module(point_copy_stage)
+                elif module_name.startswith("block"):  # Attention Blocks
+                    block_flops = 0.0
+                    # CPE
+                    cpe_conv_out = module.cpe[0](point_copy_stage.sparse_conv_feat)
+                    block_flops += compute_dense_flops(module.cpe[0], point_copy_stage.sparse_conv_feat, f"{stage_name}.{module_name}.cpe.conv")
+                    cpe_linear_out = module.cpe[1](cpe_conv_out.features)  # Use features from sparse conv output
+                    block_flops += compute_dense_flops(module.cpe[1], cpe_conv_out.features, f"{stage_name}.{module_name}.cpe.linear")
+                    block_flops += compute_dense_flops(module.cpe[2], cpe_linear_out, f"{stage_name}.{module_name}.cpe.norm")
+                    # Attention
+                    block_flops += compute_dense_flops(module.attn.qkv, point_copy_stage.feat, f"{stage_name}.{module_name}.attn.qkv")
+                    block_flops += compute_dense_flops(module.attn.proj, point_copy_stage.feat, f"{stage_name}.{module_name}.attn.proj")
+                    p = point_copy_stage.feat.shape[0]
+                    heads = module.attn.num_heads
+                    patch_size = module.attn.patch_size
+                    attn_flops = 2 * p * min(patch_size, p) * heads / 3 / 1e9
+                    block_flops += attn_flops
+                    # MLP
+                    mlp_fc1_out = module.mlp[0].fc1(point_copy_stage.feat)
+                    block_flops += compute_dense_flops(module.mlp[0].fc1, point_copy_stage.feat, f"{stage_name}.{module_name}.mlp.fc1")
+                    block_flops += compute_dense_flops(module.mlp[0].fc2, mlp_fc1_out, f"{stage_name}.{module_name}.mlp.fc2")
+                    # Norms and DropPath
+                    block_flops += compute_dense_flops(module.norm1[0], point_copy_stage.feat, f"{stage_name}.{module_name}.norm1")
+                    block_flops += compute_dense_flops(module.norm2[0], point_copy_stage.feat, f"{stage_name}.{module_name}.norm2")
+                    block_flops += compute_dense_flops(module.drop_path[0], point_copy_stage.feat, f"{stage_name}.{module_name}.drop_path")
+                    flops_dict["Encoder"][stage_name]["Blocks"][module_name] = block_flops
+                    point_copy_stage = module(point_copy_stage)
+            stage_total = flops_dict["Encoder"][stage_name]["Pooling"] + sum(flops_dict["Encoder"][stage_name]["Blocks"].values())
+            flops_dict["Encoder"][stage_name]["Total"] = stage_total
+            flops_dict["Total"] += stage_total
+            point_copy_enc = point_copy_stage  # Update for next stage
+
+        # Decoder FLOPs
+        if not self.cls_mode:
+            point_copy_dec = copy_point(point_copy_enc)  # Start with encoder output
+            for stage_name, stage in self.dec.named_children():
+                flops_dict["Decoder"][stage_name] = {"Unpooling": 0.0, "Blocks": {}}
+                point_copy_stage = copy_point(point_copy_dec)
+                for module_name, module in stage.named_children():
+                    if module_name == "up":  # Unpooling
+                        flops_dict["Decoder"][stage_name]["Unpooling"] += compute_dense_flops(
+                            module.proj[0], point_copy_stage.feat, f"{stage_name}.Unpooling.proj"
+                        )
+                        flops_dict["Decoder"][stage_name]["Unpooling"] += compute_dense_flops(
+                            module.proj_skip[0], point_copy_stage.pooling_parent.feat, f"{stage_name}.Unpooling.proj_skip"
+                        )
+                        point_copy_stage = module(point_copy_stage)
+                    elif module_name.startswith("block"):
+                        block_flops = 0.0
+                        cpe_conv_out = module.cpe[0](point_copy_stage.sparse_conv_feat)
+                        block_flops += compute_dense_flops(module.cpe[0], point_copy_stage.sparse_conv_feat, f"{stage_name}.{module_name}.cpe.conv")
+                        cpe_linear_out = module.cpe[1](cpe_conv_out.features)
+                        block_flops += compute_dense_flops(module.cpe[1], cpe_conv_out.features, f"{stage_name}.{module_name}.cpe.linear")
+                        block_flops += compute_dense_flops(module.cpe[2], cpe_linear_out, f"{stage_name}.{module_name}.cpe.norm")
+                        block_flops += compute_dense_flops(module.attn.qkv, point_copy_stage.feat, f"{stage_name}.{module_name}.attn.qkv")
+                        block_flops += compute_dense_flops(module.attn.proj, point_copy_stage.feat, f"{stage_name}.{module_name}.attn.proj")
+                        p = point_copy_stage.feat.shape[0]
+                        heads = module.attn.num_heads
+                        patch_size = module.attn.patch_size
+                        attn_flops = 2 * p * min(patch_size, p) * heads / 3 / 1e9
+                        block_flops += attn_flops
+                        mlp_fc1_out = module.mlp[0].fc1(point_copy_stage.feat)
+                        block_flops += compute_dense_flops(module.mlp[0].fc1, point_copy_stage.feat, f"{stage_name}.{module_name}.mlp.fc1")
+                        block_flops += compute_dense_flops(module.mlp[0].fc2, mlp_fc1_out, f"{stage_name}.{module_name}.mlp.fc2")
+                        block_flops += compute_dense_flops(module.norm1[0], point_copy_stage.feat, f"{stage_name}.{module_name}.norm1")
+                        block_flops += compute_dense_flops(module.norm2[0], point_copy_stage.feat, f"{stage_name}.{module_name}.norm2")
+                        block_flops += compute_dense_flops(module.drop_path[0], point_copy_stage.feat, f"{stage_name}.{module_name}.drop_path")
+                        flops_dict["Decoder"][stage_name]["Blocks"][module_name] = block_flops
+                        point_copy_stage = module(point_copy_stage)
+                stage_total = flops_dict["Decoder"][stage_name]["Unpooling"] + sum(flops_dict["Decoder"][stage_name]["Blocks"].values())
+                flops_dict["Decoder"][stage_name]["Total"] = stage_total
+                flops_dict["Total"] += stage_total
+                point_copy_dec = point_copy_stage  # Update for next stage
+
+        # Segmentation Head FLOPs
+        flops_dict["Segmentation Head"] = compute_dense_flops(self.seg_head, point_copy_dec.feat if not self.cls_mode else point_copy_enc.feat, "Segmentation Head")
+        flops_dict["Total"] += flops_dict["Segmentation Head"]
+
+        # Summarize
+        custom_logger.info(">>>>>>>>>>>>>>>> FLOPs Breakdown <<<<<<<<<<<<<<<")
+        custom_logger.info(f"Embedding: {flops_dict['Embedding']:.2f} GFLOPs")
+        for stage_name, stage_flops in flops_dict["Encoder"].items():
+            custom_logger.info(f"Encoder {stage_name}: {stage_flops['Total']:.2f} GFLOPs")
+        if not self.cls_mode:
+            for stage_name, stage_flops in flops_dict["Decoder"].items():
+                custom_logger.info(f"Decoder {stage_name}: {stage_flops['Total']:.2f} GFLOPs")
+        custom_logger.info(f"Segmentation Head: {flops_dict['Segmentation Head']:.2f} GFLOPs")
+        custom_logger.info(f"Total: {flops_dict['Total']:.2f} GFLOPs")
+
+        return flops_dict
+
     def forward(self, data_dict):
-
-        # context = self.embedding_table(
-        #     torch.tensor([0], device=data_dict["coord"].device)
-        # )
-        #
-        # data_dict["context"] = context  # --> might be helpful here
-
-        # Step 1: Preprocessing, Serialization and Sparsification
-        # preprocessing_start = time.time()
         point = Point(data_dict)
-        # preprocessing_time = time.time() - preprocessing_start
-        # custom_logger.info(f"Preprocessing time: {preprocessing_time}")
-
-        # serialization_start = time.time()
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
-        # serialization_time = time.time() - serialization_start
-        # custom_logger.info(f"Serialization time: {serialization_time}")
 
-        # ✅ Move all tensors inside `Point` to CUDA
+        # Move to CUDA
         for key, value in point.items():
             if isinstance(value, torch.Tensor):
                 point[key] = value.cuda()
             elif isinstance(value, spconv.SparseConvTensor):
-                # Move SparseConvTensor components to CUDA
                 point[key] = spconv.SparseConvTensor(
                     features=value.features.cuda(),
                     indices=value.indices.cuda(),
@@ -989,16 +878,12 @@ class PointTransformerV3TrainTeacher(PointModule):
                     batch_size=value.batch_size
                 )
 
+        # Calculate FLOPs
+        flops_dict = self.calculate_flops(point)
+
+        # Forward pass
         point = self.embedding(point)
-        # print("Latent space after embedding:", point.feat.shape)
         point = self.enc(point)
-
-        # # Test FLOPS
-        # flops = FlopCountAnalysis(self.enc, point)
-        # total_flops = flops.total()
-        # print(f"Total FLOPs: {total_flops / 1e9:.2f} GFLOPs")
-        # print(flops.by_module())  # Breakdown by module
-
         if not self.cls_mode:
             point = self.dec(point)
         else:
@@ -1007,69 +892,7 @@ class PointTransformerV3TrainTeacher(PointModule):
                 indptr=nn.functional.pad(point.offset, (1, 0)),
                 reduce="mean",
             )
-
         seg_logits = self.seg_head(point.feat)
 
-        return seg_logits
-
-
-def move_dict_to_cuda(data_dict):
-    """
-    Moves all tensor values in a dictionary to CUDA.
-
-    Args:
-        data_dict (dict): Dictionary with tensor values.
-
-    Returns:
-        dict: Dictionary with all tensors moved to CUDA.
-    """
-
-    data_dict = {key: value.cuda() if isinstance(value, torch.Tensor) else value
-            for key, value in data_dict.items()}
-
-    point = Point(data_dict)
-    return point
-
-
-def load_weights_ptv3_nucscenes_seg(model, checkpoint_path):
-    # Load the checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location=torch.device('cuda'))
-
-    try:
-        weight = OrderedDict()
-        for key, value in checkpoint["state_dict"].items():
-            if key.startswith("backbone."): # backbone module
-                if comm.get_world_size() == 1:
-                    key = key[9:]  # module.xxx.xxx -> xxx.xxx
-
-            elif key.startswith("module."):
-                if comm.get_world_size() == 1:
-                    key = key[7:]  # module.xxx.xxx -> xxx.xxx
-
-            else:
-                if comm.get_world_size() > 1:
-                    key = "module." + key  # xxx.xxx -> module.xxx.xxx
-            weight[key] = value
-        model.load_state_dict(weight, strict=False) # embedding table cannot be loaded but it is okay
-        print("Model weights loaded successfully.")
-
-    except:
-
-        model_state_dict = model.state_dict()
-
-        # Adjust the checkpoint weights to match model's state_dict keys
-        # We assume that the checkpoint weights directly correspond to model layers
-        adjusted_state_dict = {}
-
-        for key, value in checkpoint.items():
-            # If the model and checkpoint keys align, add them
-            if key in model_state_dict:
-                adjusted_state_dict[key] = value
-            else:
-                print(f"Warning: Key '{key}' not found in model state_dict.")
-
-        # Load the adjusted state dict into the model
-        model.load_state_dict(adjusted_state_dict, strict=True)
-
-    return model
+        return seg_logits, flops_dict
 

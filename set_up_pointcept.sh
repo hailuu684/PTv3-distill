@@ -41,7 +41,7 @@ module load shared rc-base CUDA/11.8.0
 module load shared rc-base cuDNN/8.9.2.26-CUDA-11.8.0
 
 # to install, load gcc 8.2.0
-module load GCC/8.2.0
+module load GCC/8.2.0  # GCC/8.2.0-2.31.1
 
 conda install ninja -y
 
@@ -57,20 +57,23 @@ pip install nuscenes-devkit
 #pip install ripser
 
 conda install -c conda-forge cmake
-pip3 install ripserplusplus
+#pip3 install ripserplusplus
 #pip install git+https://github.com/simonzhang00/ripser-plusplus.git
+pip install giotto-tda # to replace ripserplusplus
 conda install sharedarray tensorboard tensorboardx yapf addict einops scipy plyfile termcolor timm -c conda-forge -y
 
 pip install torch-cluster -f https://data.pyg.org/whl/torch-2.1.0+cu118.html
 #pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.1.0+cu118.html
 
 pip install torch-geometric
-pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" # --> load gcc/11.2.0 first to install
+
+# faster installation of pytorch3d: pip install pytorch3d works with GCC/8.2.0-2.31.1 --> but doesnt work with cuda 11.8
+pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" # --> load gcc/11.2.0 first to install / pip install pytorch3d works with GCC/8.2.0-2.31.1
 #conda install -c conda-forge gxx_linux-64=11.3.0
 pip install flash-attn --no-build-isolation
 
 # to run the code, load back gcc 11.2.0
-module load GCC/11.2.0
+module load GCC/11.2.0 # or module load GCC/12.2.0
 
 # if run the code see the error of dont have version glibc3.4.xxx --> reinstall again torch
 # train with author code:
@@ -78,3 +81,12 @@ module load GCC/11.2.0
 # Step 2: sh scripts/train_teacher.sh -p python -g 1 -d nuscenes -c semseg-pt-v3m1-0-train-teacher -r true
 
 # Train with custom code: python main.py
+
+# To solve the error: File "/home/luutunghai@gmail.com/miniconda3/envs/pointcept_H100_viz/lib/python3.8/site-packages/torch/__init__.py", line 202, in <module>
+                      #          from torch._C import *  # noqa: F403
+                      #      ImportError: /home/luutunghai@gmail.com/miniconda3/envs/pointcept_H100_viz/lib/python3.8/site-packages/torch/lib/../../../.././libstdc++.so.6: version `GLIBCXX_3.4.30' not found (required by /home/luutunghai@gmail.com/minico
+                      #nda3/envs/pointcept_H100_viz/lib/python3.8/site-packages/torch/lib/libtorch_python.so)
+                      #      [end of output]
+# ------------> Reinstall pytorch
+
+# GCCcore/12.2.0 => GCCcore/8.3.0

@@ -1,51 +1,29 @@
-from nuscenes.nuscenes import NuScenes
-from nuscenes.utils.data_classes import LidarPointCloud
-import os
-import numpy as np
 from pointcept.engines.defaults import default_config_parser, default_setup
-from gpu_main import load_weights_ptv3_nucscenes_seg
-from preprocess_mini_nuscenes import GetMiniNusceneDataset
-import matplotlib.pyplot as plt
-from pointcept.utils.env import get_random_seed, set_seed
-from pointcept.utils.config import Config
-import pointcept.utils.comm as comm
-import ast
-import time
-import torch.nn.functional as F
+from pointcept.engines import test
 from dataloader import PTv3_Dataloader
 from main import get_student_model, load_weights_ptv3_nucscenes_seg, get_teacher_model
-from main import get_teacher_model
-from pointcept.engines import test
 import torch
+import torch.nn.functional as F
+import time
+import os
 
 
-def visualization():
-    PRETRAINED_PATH = './checkpoints/thomas_model_best.pth'
-    TEACHER_CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-train-teacher.py"
+def get_grid_size(size=0.05):
+    CONFIG_FILE = "configs/nuscenes/semseg-pt-v3m1-0-train-teacher.py"
 
     # Load configuration
-    cfg = default_config_parser(TEACHER_CONFIG_FILE, None)
+    cfg = default_config_parser(CONFIG_FILE, None)
     cfg = default_setup(cfg)
-    cfg.model.backbone.enable_flash = False
-    cfg.turn_on_TTA_testing = False  # todo: set this to False doesnt turn off TTA in config file, fix later
-    class_names = cfg.names
 
-    # Load teacher model
-    teacher_model = get_teacher_model(cfg)
+    # grid_size = cfg.data.train.transform[4].grid_size
 
-    # Load pretrained weights
-    model = load_weights_ptv3_nucscenes_seg(teacher_model, PRETRAINED_PATH)
+    cfg.data.train.transform[4].grid_size = size
 
-    # Move model to device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = model.to(device)
-
-    tester = test.CustomSemSegTester(cfg=cfg, model=model)
-    tester.visualize_prediction_and_GT(is_TTA_on=cfg.turn_on_TTA_testing, names="Nuscenes_grid_0.05",
-                                       class_names=class_names, scene_ids=[10])
+    print(cfg.data.train.transform[4].grid_size)
 
 
-def visualize_GT_pred_student_teacher():
+def get_sample_data():
+
     CONFIG_FILE_STUDENT = "configs/nuscenes/semseg-pt-v3m1-0-train-student.py"
     PRETRAINED_PATH_STUDENT = './checkpoints/checkpoint_batch_40001.pth'
 
@@ -69,7 +47,7 @@ def visualize_GT_pred_student_teacher():
     grid_size = 0.01 --> Segment shape =  (29844,) | ~ 22 fragments
     grid_size = 0.05 --> Segment shape =  (27815,) | 8 fragments
     grid_size = 0.1 --> Segment shape =  (17659,) | 1 fragment
-
+    
     On train dataset
     grid_size = 0.01 --> Segment shape = (249670)  | 1 fragment
     grid_size = 0.05 --> Segment shape =  (249670) | 1 fragments
@@ -93,7 +71,7 @@ def visualize_GT_pred_student_teacher():
 
     # Data load
     loader = PTv3_Dataloader(cfg_student)
-    val_loader = loader.load_validation_data()
+    val_loader = loader.load_training_data()
 
     teacher_model.eval()
     student_model.eval()
@@ -102,7 +80,7 @@ def visualize_GT_pred_student_teacher():
         if batch_ndx == 0:
             continue
 
-        if batch_ndx == 50:
+        if batch_ndx == 100:
             break
 
         # GT
@@ -113,7 +91,7 @@ def visualize_GT_pred_student_teacher():
         student_seg_pred_label = get_pred_time_inference(student_model, input_dict, model_type='student')
 
         # Save paths
-        data_type = 'val_data'
+        data_type = 'train_data'
         base_path = f'./visualization/{data_type}'
 
         # Ensure the directory exists
@@ -139,21 +117,45 @@ def visualize_GT_pred_student_teacher():
                                                save_path=GT_path,
                                                title="Ground Truth")
 
+    # for batch_ndx, input_dict in enumerate(test_loader):
+    #     if batch_ndx == 1:
+    #         break
+    #
+    #     input_dict = input_dict[0]
+    #     fragment_list = input_dict.pop("fragment_list")
+    #     segment = input_dict.pop("segment")
+    #     origin_segment = input_dict.pop("origin_segment")
+    #
+    #     # data_name = input_dict.pop("name")
+    #
+    #     print("Segment shape = ", segment.shape)
+    #     print("Origin segment shape = ", origin_segment.shape)
+    #
+    #     for i in range(len(fragment_list)):
+    #
+    #         input_ = fragment_list[i]
+    #         coord = input_['coord']
+    #         index = input_['index']
+    #         offset = input_['offset']
+    #         print(coord.shape, index.shape, offset.shape)
+
 
 def get_pred_time_inference(model, input_dict, model_type='teacher'):
 
-    # pred_start = time.time()
+    pred_start = time.time()
     seg_logits = model(input_dict)  # --> 16Gb VRAM is not enough if not splitting into chunks
-    # pred_end_time = time.time() - pred_start
+    pred_end_time = time.time() - pred_start
 
     seg_pred_softmax = F.softmax(seg_logits, -1)
 
     seg_pred_label = torch.argmax(seg_pred_softmax, dim=-1)  # Shape: (24150,)
 
-    # print(f"Inference {model_type} time = {pred_end_time:.2f} s")
+    print(f"Inference {model_type} time = {pred_end_time:.2f} s")
 
     return seg_pred_label
 
 
 if __name__ == "__main__":
-    visualization()
+
+    get_sample_data()
+    # get_grid_size(size=0.1)

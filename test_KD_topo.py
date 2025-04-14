@@ -404,6 +404,6 @@ def train_KD(alpha=0.5, beta=0.3, T=2.0, num_epochs=10, lr=0.001):
     print("✅ Student Model Saved!")
 
 
-train_KD()
+# train_KD()
 
 

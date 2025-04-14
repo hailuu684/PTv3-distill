@@ -7,7 +7,7 @@ save_path = 'exp/nuscenes/semseg-pt-v3m1-0-train-student'
 miou_result_path = f"/home/luutunghai@gmail.com/projects/PTv3-distill/{save_path}/miou_result"
 
 num_worker = 1
-batch_size = 12  # takes 79 Gb RAMs on A100
+batch_size = 5  # takes 79 Gb RAMs on A100
 batch_size_val = 18
 batch_size_test = 1
 epoch = 50
@@ -88,6 +88,69 @@ names = [
     'pedestrian', 'traffic_cone', 'trailer', 'truck', 'driveable_surface',
     'other_flat', 'sidewalk', 'terrain', 'manmade', 'vegetation'
 ]
+
+
+turn_on_TTA_testing = False
+
+TTA_augmentations = [
+                [{
+                    'type': 'RandomScale',
+                    'scale': [0.9, 0.9]
+                }], [{
+                    'type': 'RandomScale',
+                    'scale': [0.95, 0.95]
+                }], [{
+                    'type': 'RandomScale',
+                    'scale': [1, 1]
+                }], [{
+                    'type': 'RandomScale',
+                    'scale': [1.05, 1.05]
+                }], [{
+                    'type': 'RandomScale',
+                    'scale': [1.1, 1.1]
+                }],
+                [{
+                    'type': 'RandomScale',
+                    'scale': [0.9, 0.9]
+                }, {
+                    'type': 'RandomFlip',
+                    'p': 1
+                }],
+                [{
+                    'type': 'RandomScale',
+                    'scale': [0.95, 0.95]
+                }, {
+                    'type': 'RandomFlip',
+                    'p': 1
+                }],
+                [{
+                    'type': 'RandomScale',
+                    'scale': [1, 1]
+                }, {
+                    'type': 'RandomFlip',
+                    'p': 1
+                }],
+                [{
+                    'type': 'RandomScale',
+                    'scale': [1.05, 1.05]
+                }, {
+                    'type': 'RandomFlip',
+                    'p': 1
+                }],
+                [{
+                    'type': 'RandomScale',
+                    'scale': [1.1, 1.1]
+                }, {
+                    'type': 'RandomFlip',
+                    'p': 1
+                }]
+    ]
+
+simple_augmentation = [
+                [dict(type="RandomRotateTargetAngle", angle=[0], axis="z", center=[0, 0, 0], p=1)]
+            ]
+
+
 data = dict(
     num_classes=16,
     ignore_index=-1,
@@ -178,9 +241,7 @@ data = dict(
                     keys=('coord', 'grid_coord', 'index'),
                     feat_keys=('coord', 'strength'))
             ],
-            aug_transform=[
-                    [dict(type="RandomRotateTargetAngle", angle=[0], axis="z", center=[0, 0, 0], p=1)]
-            ]),
+            aug_transform=TTA_augmentations if turn_on_TTA_testing else simple_augmentation),
         ignore_index=-1))
 
 """
