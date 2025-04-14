@@ -156,4 +156,4 @@ def get_pred_time_inference(model, input_dict, model_type='teacher'):
 
 
 if __name__ == "__main__":
-    visualization()
+    visualize_GT_pred_student_teacher()
