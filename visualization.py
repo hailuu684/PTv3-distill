@@ -88,10 +88,13 @@ def visualize_GT_pred_student_teacher():
     teacher_model = teacher_model.to(device)
     student_model = student_model.to(device)
 
+    # visualization function have separate the model used for prediction, so passing teacher_model here is only
+    # for initializing the class tester
     tester = test.CustomSemSegTester(cfg=cfg_student, model=teacher_model)
     # test_loader = tester.build_test_loader()
 
-    # Data load
+    # Data loader
+    # configs of student and teacher are the same for setting dataset, so either cfg_student or cfg_teacher are okay
     loader = PTv3_Dataloader(cfg_student)
     val_loader = loader.load_validation_data()
 
