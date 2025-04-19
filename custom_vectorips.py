@@ -4,28 +4,76 @@ import torch.nn as nn
 import numpy as np
 from gtda.homology import VietorisRipsPersistence
 from pytorch3d.loss import chamfer_distance
-from torch_cluster import knn
+try:
+    from torch_cluster import knn
+    KNN_AVAILABLE = True
+except ImportError:
+    KNN_AVAILABLE = False
 
 
 class DifferentiableVietorisRipsPersistence:
-    """
-    A PyTorch-based, differentiable approximation of Vietoris-Rips persistent homology.
-    Computes persistence diagrams for dimensions 0 and 1 using the full point cloud.
-    """
+    def __init__(self, homology_dimensions=[0, 1], max_edge_length=2.0,
+                 max_edges=100000, max_cycles=100,
+                 use_knn=False, knn_neighbors=20,
+                 auto_config=False):
 
-    def __init__(self, homology_dimensions=[0, 1], max_edge_length=0.4):
-        """
-        Args:
-            homology_dimensions: List of homology dimensions to compute (e.g., [0, 1]).
-            max_edge_length: Maximum edge length for filtration.
-        """
         self.homology_dimensions = homology_dimensions
         self.max_edge_length = max_edge_length
+        self.max_edges = max_edges
+        self.max_cycles = max_cycles
+        self.use_knn = use_knn and KNN_AVAILABLE  # Fall back to non-kNN if torch-cluster is unavailable
+        self.knn_neighbors = knn_neighbors
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if self.use_knn and not KNN_AVAILABLE:
+            print("Warning: torch-cluster not available, falling back to non-kNN method.")
+
+        self.auto_config = auto_config
+
+    def auto_configure(self, points):
+        """
+        Automatically select max_edge_length and max_edges based on point cloud properties.
+        Args:
+            points: torch.Tensor of shape (n_points, n_features)
+        Returns:
+            max_edge_length: float
+            max_edges: int
+        """
+        n_points = points.shape[0]
+        sample_size = min(n_points, 1000)  # Sample for large clouds
+        sample_indices = torch.randperm(n_points)[:sample_size]
+        sample_points = points[sample_indices]
+
+        # Estimate edge distances (use k-NN for efficiency if available)
+        if self.use_knn and KNN_AVAILABLE:
+            k = 5
+            row, col = knn(sample_points, sample_points, k, batch_x=None, batch_y=None)
+            mask = row < col
+            edge_dists = torch.norm(sample_points[row[mask]] - sample_points[col[mask]], dim=-1)
+        else:
+            dist = torch.cdist(sample_points, sample_points, p=2)
+            mask = torch.triu(torch.ones_like(dist, dtype=torch.bool), diagonal=1)
+            edge_dists = dist[mask]
+
+        # Set max_edge_length as 3× the 90th percentile distance
+        if edge_dists.numel() > 0:
+            max_edge_length = torch.quantile(edge_dists, 0.9).item() * 3.0
+        else:
+            max_edge_length = 1.0  # Fallback for sparse clouds
+
+        # Estimate total edges (approximate for k-NN or full matrix)
+        if self.use_knn:
+            total_edges = n_points * 20 / 2  # k=20, halved for deduplication
+        else:
+            total_edges = n_points * (n_points - 1) / 2  # Full matrix upper triangle
+        # Set max_edges as 5% of total edges or 2× n_points, capped at 100,000
+        max_edges = min(int(0.05 * total_edges), 2 * n_points, 100000)
+        max_edges = max(max_edges, 1000)  # Ensure minimum for small clouds
+
+        return max_edge_length, max_edges
 
     def _compute_distance_matrix(self, points):
         """
-        Compute pairwise distances for k-NN edges.
+        Compute pairwise distances using k-NN or full distance matrix.
         Args:
             points: torch.Tensor of shape (n_points, n_features)
         Returns:
@@ -36,44 +84,54 @@ class DifferentiableVietorisRipsPersistence:
         if n_points <= 1:
             return torch.tensor([], device=self.device), torch.tensor([], device=self.device, dtype=torch.long)
 
-        # Compute k-NN (k=50 neighbors per point)
-        k = 50
-        row, col = knn(points, points, k, batch_x=None, batch_y=None)
-        # Remove duplicates (i < j) and self-loops
-        mask = row < col
-        edge_pairs = torch.stack([row[mask], col[mask]], dim=1)  # Shape: (n_edges, 2)
-        edge_dists = torch.norm(points[row[mask]] - points[col[mask]], dim=-1)  # Shape: (n_edges,)
-        # Filter by max_edge_length
-        mask = edge_dists <= self.max_edge_length
-        return edge_dists[mask], edge_pairs[mask]
+        # Auto-configure max_edge_length and max_edges if not set
+        if self.auto_config:
+            self.max_edge_length, self.max_edges = self.auto_configure(points)
+            print(f"--> Auto-configured: max_edge_length={self.max_edge_length:.4f}, max_edges={self.max_edges}")
+
+        if self.use_knn:
+            # k-NN version
+            k = self.knn_neighbors  # Number of neighbors
+            row, col = knn(points, points, k, batch_x=None, batch_y=None)
+            mask = row < col
+            edge_pairs = torch.stack([row[mask], col[mask]], dim=1)
+            edge_dists = torch.norm(points[row[mask]] - points[col[mask]], dim=-1)
+            mask = edge_dists <= self.max_edge_length
+            return edge_dists[mask], edge_pairs[mask]
+        else:
+            # Full distance matrix version with dynamic chunking
+            max_chunk_size = 10000  # Maximum chunk size for large point clouds
+            chunk_size = min(n_points, max_chunk_size)  # Use full size for small clouds
+            edge_dists = []
+            edge_pairs = []
+            for i in range(0, n_points, chunk_size):
+                points_i = points[i:i + chunk_size]
+                dist = torch.cdist(points_i, points, p=2)  # Shape: (chunk_size, n_points)
+                # Mask upper triangle (i < j) to avoid duplicates
+                mask = (dist <= self.max_edge_length) & (
+                torch.ones_like(dist, dtype=torch.bool).triu(diagonal=1)[:dist.shape[0], :])
+                chunk_dists = dist[mask]
+                row, col = torch.where(mask)
+                row = row + i  # Adjust row indices for chunk offset
+                chunk_pairs = torch.stack([row, col], dim=1)
+                edge_dists.append(chunk_dists)
+                edge_pairs.append(chunk_pairs)
+            edge_dists = torch.cat(edge_dists) if edge_dists else torch.tensor([], device=self.device)
+            edge_pairs = torch.cat(edge_pairs) if edge_pairs else torch.tensor([], device=self.device, dtype=torch.long)
+            return edge_dists, edge_pairs
 
     def _approximate_dim0(self, edge_dists, edge_pairs):
-        """
-        Approximate dimension 0 persistence (connected components) using a soft MST.
-        Args:
-            edge_dists: torch.Tensor of shape (n_edges,), distances of valid edges
-            edge_pairs: torch.Tensor of shape (n_edges, 2), pairs of point indices
-        Returns:
-            diagram: torch.Tensor of shape (n_features, 3) with [birth, death, dim]
-        """
         n_points = edge_pairs.max().item() + 1 if edge_pairs.numel() > 0 else 0
         if n_points == 0:
             return torch.tensor([], device=self.device).reshape(0, 3)
-
-        # Initialize components
-        births = torch.zeros(n_points, device=self.device)  # Birth at 0
+        births = torch.zeros(n_points, device=self.device)
         if edge_dists.numel() == 0:
             return torch.tensor([[0.0, 0.0, 0.0] for _ in range(n_points)], device=self.device)
-
-        # Sort edges (differentiable approximation)
-        edge_weights = torch.softmax(-edge_dists, dim=0)  # Shape: (n_edges,)
+        edge_weights = torch.softmax(-edge_dists, dim=0)
         sorted_indices = torch.argsort(edge_dists)
-
-        # Initialize component assignments
+        sorted_indices = sorted_indices[:self.max_edges]
         component = torch.arange(n_points, device=self.device, dtype=torch.long)
         deaths = []
-
-        # Process edges
         for idx in sorted_indices:
             i, j = edge_pairs[idx]
             dist = edge_dists[idx]
@@ -81,50 +139,34 @@ class DifferentiableVietorisRipsPersistence:
                 new_comp = torch.min(component[i], component[j])
                 old_comp_i = component[i]
                 old_comp_j = component[j]
-                # Create new component tensor
                 new_component = component.clone()
                 new_component[component == old_comp_i] = new_comp
                 new_component[component == old_comp_j] = new_comp
                 component = new_component
                 deaths.append(dist)
-
-        # Create diagram
         if not deaths:
             return torch.tensor([], device=self.device).reshape(0, 3)
-        deaths = torch.stack(deaths)  # Shape: (n_deaths,)
+        deaths = torch.stack(deaths)
         births = torch.zeros_like(deaths)
         dims = torch.zeros_like(deaths)
-        diagram = torch.stack([births, deaths, dims], dim=1)  # Shape: (n_deaths, 3)
-        diagram = diagram[diagram[:, 1] > diagram[:, 0]]  # Filter invalid
+        diagram = torch.stack([births, deaths, dims], dim=1)
+        diagram = diagram[diagram[:, 1] > diagram[:, 0]]
         return diagram
 
     def _approximate_dim1(self, edge_dists, edge_pairs):
-        """
-        Approximate dimension 1 persistence (loops) using a filtration-based approach.
-        Args:
-            edge_dists: torch.Tensor of shape (n_edges,), distances of valid edges
-            edge_pairs: torch.Tensor of shape (n_edges, 2), pairs of point indices
-        Returns:
-            diagram: torch.Tensor of shape (n_features, 3) with [birth, death, dim]
-        """
         n_points = edge_pairs.max().item() + 1 if edge_pairs.numel() > 0 else 0
         if n_points < 3:
             return torch.tensor([], device=self.device).reshape(0, 3)
-
-        # Sort edges by distance for filtration
         sorted_indices = torch.argsort(edge_dists)
+        sorted_indices = sorted_indices[:self.max_edges]
         edge_dists_sorted = edge_dists[sorted_indices]
         edge_pairs_sorted = edge_pairs[sorted_indices]
-
-        # Initialize union-find for tracking connected components
         parent = torch.arange(n_points, device=self.device, dtype=torch.long)
         rank = torch.zeros(n_points, device=self.device, dtype=torch.long)
-
         def find(u):
             if parent[u] != u:
                 parent[u] = find(parent[u])
             return parent[u]
-
         def union(u, v):
             pu, pv = find(u), find(v)
             if pu == pv:
@@ -135,68 +177,44 @@ class DifferentiableVietorisRipsPersistence:
             if rank[pu] == rank[pv]:
                 rank[pu] += 1
             return True
-
-        # Track cycles and their birth/death times
         diagram = []
+        cycle_count = 0
         edge_index = 0
         n_edges = len(edge_dists_sorted)
-
-        # Process edges in filtration order
-        while edge_index < n_edges:
+        while edge_index < n_edges and cycle_count < self.max_cycles:
             current_dist = edge_dists_sorted[edge_index]
             cycle_edges = []
-            # Collect all edges at the current distance (to handle simplicial complex)
             while edge_index < n_edges and abs(edge_dists_sorted[edge_index] - current_dist) < 1e-6:
                 i, j = edge_pairs_sorted[edge_index]
-                if not union(i, j):  # Edge creates a cycle
+                if not union(i, j):
                     cycle_edges.append(edge_index)
                 edge_index += 1
-
-            # Assign death times for detected cycles
             for cycle_idx in cycle_edges:
                 birth = edge_dists_sorted[cycle_idx]
-                # Look ahead for a death time (next distinct distance)
                 death_idx = edge_index
                 while death_idx < n_edges and edge_dists_sorted[death_idx] <= birth:
                     death_idx += 1
                 death = edge_dists_sorted[death_idx] if death_idx < n_edges else birth + 0.1
-                if death > birth + 1e-2:  # Filter low-persistence cycles
+                if death > birth + 0.05:
                     diagram.append([birth, death, 1.0])
-
-        # Convert to tensor and filter
+                    cycle_count += 1
+                    if cycle_count >= self.max_cycles:
+                        break
         if not diagram:
             return torch.tensor([], device=self.device).reshape(0, 3)
-
         diagram = torch.tensor(diagram, device=self.device)
-        # Filter by persistence
         persistence = diagram[:, 1] - diagram[:, 0]
-
-        # weights = torch.sigmoid((persistence - 1e-2) * 100)  # Smooth transition
-        # diagram = diagram * weights.unsqueeze(1)  # Weight features
-
-        significant = persistence > 1e-2  # Stricter threshold
-        diagram = diagram[significant]
-
-        # Limit number of features to avoid over-detection
-        if diagram.shape[0] > 50:  # Arbitrary cap based on expected circle features
-            persistence = diagram[:, 1] - diagram[:, 0]
-            _, top_indices = torch.topk(persistence, k=50, largest=True)
-            diagram = diagram[top_indices]
-
+        weights = torch.sigmoid((persistence - 0.05) * 100)
+        diagram[:, :2] = diagram[:, :2] * weights.unsqueeze(1)
+        print(f"Dimension 1 cycles detected: {diagram.shape[0]}")
         return diagram
 
     def fit_transform(self, X):
-        """
-        Compute persistence diagrams for a batch of point clouds.
-        Args:
-            X: torch.Tensor of shape (n_samples, n_points, n_features)
-        Returns:
-            diagrams: List of torch.Tensor, each of shape (n_features, 3) with [birth, death, dim]
-        """
         diagrams = []
         for i in range(X.shape[0]):
-            points = X[i]  # Shape: (n_points, n_features)
+            points = X[i]
             edge_dists, edge_pairs = self._compute_distance_matrix(points)
+            print(f"Number of edges: {edge_dists.shape[0]}")
             diagram = []
             if 0 in self.homology_dimensions:
                 dim0 = self._approximate_dim0(edge_dists, edge_pairs)
@@ -205,7 +223,6 @@ class DifferentiableVietorisRipsPersistence:
                 dim1 = self._approximate_dim1(edge_dists, edge_pairs)
                 diagram.append(dim1)
             if 2 in self.homology_dimensions:
-                # Placeholder: no features for dimension 2
                 diagram.append(torch.tensor([], device=self.device).reshape(0, 3))
             diagram = torch.cat(diagram, dim=0) if diagram else torch.tensor([], device=self.device).reshape(0, 3)
             diagrams.append(diagram)
@@ -253,7 +270,7 @@ class TestDifferentiableVietorisRipsPersistence(unittest.TestCase):
     def setUp(self):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.vr = DifferentiableVietorisRipsPersistence(
-            homology_dimensions=[0, 1], max_edge_length=0.4
+            homology_dimensions=[0, 1], max_edge_length=0.4, max_edges=200, use_knn=False, auto_config=True
         )
         self.vr_giotto = VietorisRipsPersistence(homology_dimensions=[0, 1])
 
@@ -359,25 +376,28 @@ def test_on_simple_model():
     class SimpleModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.fc = nn.Linear(2, 2)  # Transform point cloud
-            self.vr = DifferentiableVietorisRipsPersistence(homology_dimensions=[0, 1, 2],
-                                                            max_edge_length=2.0)  # Increased max_edge_length
+            self.fc = nn.Linear(2, 2)
+            self.vr = DifferentiableVietorisRipsPersistence(homology_dimensions=[0, 1, 2], max_edge_length=2.0,
+                                                            max_edges=200, use_knn=False, knn_neighbors=20,
+                                                            auto_config=True)
 
         def forward(self, points):
-            # points: (batch_size, n_points, 2)
-            points = self.fc(points)  # Transform points
-            diagrams = self.vr.fit_transform(points)  # Compute persistence diagrams
-            # Aggregate diagrams (sum of birth and death times for all dimensions)
+            points = self.fc(points)
+            diagrams = self.vr.fit_transform(points)
             batch_features = []
-            for diagram in diagrams:
-                if diagram.shape[0] == 0:
-                    # Handle empty diagram with a differentiable default
-                    feature = torch.tensor(0.0, device=points.device, requires_grad=True)
-                else:
-                    # Sum birth and death times to ensure gradient flow
-                    feature = diagram[:, 0].sum() + diagram[:, 1].sum()  # Includes dim 0 and dim 1
+            for i, diagram in enumerate(diagrams):
+                print(f"Diagram {i} shape: {diagram.shape}")
+                if diagram.shape[0] > 0:
+                    print(f"Diagram {i} dim0 features: {(diagram[:, 2] == 0).sum().item()}")
+                    print(f"Diagram {i} dim1 features: {(diagram[:, 2] == 1).sum().item()}")
+                    print(f"Diagram {i} sample: {diagram[:5]}")
+                feature = diagram[:, 0].sum() + diagram[:, 1].sum() if diagram.shape[0] > 0 else torch.tensor(0.0,
+                                                                                                              device=points.device,
+                                                                                                              requires_grad=True)
                 batch_features.append(feature)
-            return torch.stack(batch_features)
+            output = torch.stack(batch_features)
+            print(f"Output: {output}")
+            return output
 
     def generate_large_circle(n_points=100000, radius=1.0, noise=0.05):
         """
@@ -397,13 +417,13 @@ def test_on_simple_model():
 
     # Normalize input to unit scale
     # Generate large point cloud
-    points = generate_large_circle(n_points=50000, radius=1.0, noise=0.05).to(device)
+    points = generate_large_circle(n_points=100, radius=1.0, noise=0.05).to(device)
 
     # Prepare input
     points = points.unsqueeze(0).requires_grad_(True)  # Shape: (1, n_subsample, 2)
     points = points / points.norm(dim=-1, keepdim=True).clamp(min=1e-6)  # Normalize
 
-    points = points.requires_grad_(True)
+    points.retain_grad()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
     # Forward pass
@@ -417,6 +437,6 @@ def test_on_simple_model():
 
 
 if __name__ == "__main__":
-    # unittest.main(argv=[''], exit=False)
+    unittest.main(argv=[''], exit=False)
 
-    test_on_simple_model()
+    # test_on_simple_model()
