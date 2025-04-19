@@ -286,15 +286,10 @@ def test_topo_new_function():
         weight_decay=cfg.optimizer.weight_decay
     )
 
-    # # Freeze weights
-    # for param in teacher_model.parameters():
-    #     param.requires_grad = False
-    #
-    # teacher_model.eval()
-
+    student_model.train()
     for batch_ndx, input_dict in enumerate(train_loader):
 
-        if batch_ndx == 2:
+        if batch_ndx == 10:
             break
 
         # Move all input tensors to the correct device
@@ -303,24 +298,27 @@ def test_topo_new_function():
         # for param in teacher_model.parameters():
         #     param.requires_grad = True
 
-        seg_logits, feat_enc = teacher_model(input_dict)  # teacher_latent_feature (N, 512) --> for homology, not this
+        teacher_seg_logits, teacher_latent_feature = teacher_model(input_dict)  # teacher_latent_feature (N, 512) --> for homology, not this
 
-        student_seg_logits, student_enc_feature = student_model(input_dict)  # student_latent_feature (N, 512)
+        student_seg_logits, student_latent_feature = student_model(input_dict)  # student_latent_feature (N, 512)
 
         input_dict['feat'] = input_dict['feat'].to(device).requires_grad_(True)
         ground_truth = input_dict['segment'].to(device).long()
 
         # CE + Lovasz Loss
-        teacher_loss = detection_loss_fn(seg_logits, ground_truth)
+        teacher_loss = detection_loss_fn(teacher_seg_logits, ground_truth)
         student_loss = detection_loss_fn(student_seg_logits, ground_truth)
 
         # Get gradients
-        M_teacher = gradient_guided_features(teacher_loss, feat_enc)
-        M_student = gradient_guided_features(student_loss, student_enc_feature)
+        M_teacher = gradient_guided_features(teacher_loss, teacher_latent_feature)
+        M_student = gradient_guided_features(student_loss, student_latent_feature)
 
-        gkd_loss = F.l1_loss(M_student, M_teacher)
+        # gkd_loss = F.l1_loss(M_student, M_teacher)
 
-        # Total loss (example: combine segmentation and distillation losses)
+        # Compute Smooth L1 loss (replacing L1 loss)
+        gkd_loss = F.smooth_l1_loss(M_student, M_teacher, beta=1.0)  # beta controls smoothness
+
+        # Total loss
         total_loss = student_loss + gkd_loss
 
         # Backward pass for student model
@@ -331,7 +329,7 @@ def test_topo_new_function():
         print(f"Batch {batch_ndx}, GKD Loss: {gkd_loss.item()}, Total Loss: {total_loss.item()}")
 
         # Explicitly clear teacher-related tensors to free memory
-        del teacher_loss, feat_enc, seg_logits, M_teacher
+        del teacher_loss, teacher_seg_logits, teacher_latent_feature, M_teacher
         torch.cuda.empty_cache()  # Clear GPU memory cache (use cautiously)
 
         # Use Knn to select representative points
