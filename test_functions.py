@@ -3,6 +3,7 @@ from pointcept.engines import test
 from dataloader import PTv3_Dataloader
 from main import get_student_model, load_weights_ptv3_nucscenes_seg, get_teacher_model
 from gpu_main import get_teacher_model as distill_teacher_model
+from gpu_main import get_student_model as distill_student_model
 import torch
 import torch.nn.functional as F
 import time
@@ -12,6 +13,7 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.sparse import csr_matrix
 import numpy as np
 from pointcept.models.losses import build_criteria
+from gpu_main import compute_chamfer_loss_no_topo
 
 
 def get_grid_size(size=0.05):
@@ -259,12 +261,16 @@ def test_topo_new_function():
     # Enable of disable flash attention | Enable if can request A100 GPU
     cfg.model.teacher_backbone.enable_flash = False
 
+    # Init models
     teacher_model = distill_teacher_model(cfg=cfg)
     teacher_model = load_weights_ptv3_nucscenes_seg(teacher_model, PRETRAINED_PATH)
+
+    student_model = distill_student_model(cfg=cfg)
 
     # Move model to device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     teacher_model = teacher_model.to(device)
+    student_model = student_model.to(device)
 
     # Data load
     loader = PTv3_Dataloader(cfg)
@@ -273,47 +279,100 @@ def test_topo_new_function():
     # Loss function
     detection_loss_fn = build_criteria(cfg.model.criteria)
 
+    # Optimizer for student model
+    student_optimizer = torch.optim.AdamW(
+        student_model.parameters(),
+        lr=cfg.optimizer.lr,
+        weight_decay=cfg.optimizer.weight_decay
+    )
+
+    # # Freeze weights
+    # for param in teacher_model.parameters():
+    #     param.requires_grad = False
+    #
+    # teacher_model.eval()
+
     for batch_ndx, input_dict in enumerate(train_loader):
 
-        if batch_ndx == 1:
+        if batch_ndx == 2:
             break
 
         # Move all input tensors to the correct device
         input_dict = {k: v.to(device) if torch.is_tensor(v) else v for k, v in input_dict.items()}
 
-        # Forward pass through teacher model
-        # with torch.no_grad():
+        # for param in teacher_model.parameters():
+        #     param.requires_grad = True
+
         seg_logits, feat_enc = teacher_model(input_dict)  # teacher_latent_feature (N, 512) --> for homology, not this
 
-        teacher_preds = torch.argmax(seg_logits, dim=1)
+        student_seg_logits, student_enc_feature = student_model(input_dict)  # student_latent_feature (N, 512)
 
         input_dict['feat'] = input_dict['feat'].to(device).requires_grad_(True)
-        ground_truth = input_dict["segment"].to(device).long()
+        ground_truth = input_dict['segment'].to(device).long()
 
+        # CE + Lovasz Loss
         teacher_loss = detection_loss_fn(seg_logits, ground_truth)
+        student_loss = detection_loss_fn(student_seg_logits, ground_truth)
 
-        print(teacher_loss)
+        # Get gradients
+        M_teacher = gradient_guided_features(teacher_loss, feat_enc)
+        M_student = gradient_guided_features(student_loss, student_enc_feature)
 
-        teacher_gradients = torch.autograd.grad(
-            outputs=seg_logits,
-            inputs=input_dict,
-            grad_outputs=torch.ones_like(teacher_loss),
-            retain_graph=True,
-            create_graph=False
-        )
-        print(teacher_gradients)
+        gkd_loss = F.l1_loss(M_student, M_teacher)
 
-        # print(seg_logits.shape)
-        #
-        # print(feat_enc.feat.shape)
+        # Total loss (example: combine segmentation and distillation losses)
+        total_loss = student_loss + gkd_loss
+
+        # Backward pass for student model
+        student_optimizer.zero_grad()
+        total_loss.backward()
+        student_optimizer.step()
+
+        print(f"Batch {batch_ndx}, GKD Loss: {gkd_loss.item()}, Total Loss: {total_loss.item()}")
+
+        # Explicitly clear teacher-related tensors to free memory
+        del teacher_loss, feat_enc, seg_logits, M_teacher
+        torch.cuda.empty_cache()  # Clear GPU memory cache (use cautiously)
 
         # Use Knn to select representative points
         # TDA_features = compute_ph_sparse_knn(feat_enc.feat)
 
-        # # Compute PH based on batch | takes too much time
+        # # Compute PH based on batch | takes too much time --> don't recommend this
         # TDA_features = compute_ph_batched(feat_enc.feat, batch_size=5000)
 
         # print(TDA_features)
+
+        # for param in teacher_model.parameters():
+        #     param.requires_grad = False
+        #
+        # teacher_model.eval()
+
+        # ... backward code
+
+
+def gradient_guided_features(output_loss, enc_feature):
+
+    # enc_feature.feat.retain_grad()
+
+    # 1. Get gradients of loss w.r.t. point-wise features
+    grads = torch.autograd.grad(
+        outputs=output_loss,
+        inputs=enc_feature.feat,
+        grad_outputs=torch.ones_like(output_loss),
+        retain_graph=True,
+        create_graph=False
+    )[0]  # Shape: (N, C)
+
+    # 2. Compute importance per channel: w = 1 / N * Sum(L/Activation)
+    weights = grads.abs().mean(dim=0)  # Shape: (C,)
+
+    # 3. Weight the original features
+    weighted_feat = enc_feature.feat * weights  # broadcasting over points
+
+    M = weighted_feat.sum(dim=1)  # Shape: (N,)
+    M = (M - M.min()) / (M.max() - M.min() + 1e-6)  # Normalize
+
+    return M
 
 
 if __name__ == "__main__":
