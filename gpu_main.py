@@ -209,34 +209,101 @@ def get_student_model(cfg):
     )
 
 
-def compute_chamfer_loss(persistence_diagram_1, persistence_diagram_2):
+def compute_persistence_entropy(diagram, dimensions=[0, 1, 2], device='cuda'):
     """
-    Compute the Chamfer loss between two persistence diagrams.
-
+    Compute differentiable persistence entropy features for each homology dimension.
     Args:
-        persistence_diagram_1 (list of torch.Tensor): Teacher's persistence diagrams.
-        persistence_diagram_2 (list of torch.Tensor): Student's persistence diagrams.
-
+        diagram: torch.Tensor of shape (N, 3) with [birth, death, dimension]
+        dimensions: List of homology dimensions to compute entropy for
+        device: Device for computation
     Returns:
-        torch.Tensor: The Chamfer loss.
+        torch.Tensor: Entropy features of shape (n_dimensions, 1)
     """
-    total_loss = 0.0
+    entropy_features = []
+    for dim in dimensions:
+        mask = diagram[:, 2] == dim
+        points = diagram[mask]
+        if points.shape[0] == 0:
+            entropy_features.append(torch.tensor(0.0, device=device))
+            continue
 
-    for pd1, pd2 in zip(persistence_diagram_1, persistence_diagram_2):
+        # Compute persistence (death - birth)
+        persistence = points[:, 1] - points[:, 0]  # Shape: (N,)
+        persistence = torch.clamp(persistence, min=0.0)  # Handle numerical errors
 
-        # Normalize persistence diagram
-        pd1 = normalize_diagram(pd1)
-        pd2 = normalize_diagram(pd2)
+        # Normalize persistence to sum to 1 (like probabilities)
+        total_persistence = torch.sum(persistence)
+        if total_persistence > 0:
+            p = persistence / (total_persistence + 1e-8)
+            # Compute entropy: -sum(p * log(p))
+            entropy = -torch.sum(p * torch.log(p + 1e-8))
+        else:
+            entropy = torch.tensor(0.0, device=device)
 
-        # Ensure the tensors are on the same device
-        pd1 = pd1.to(persistence_diagram_1[0].device).unsqueeze(0)  # [1, N, D]
-        pd2 = pd2.to(persistence_diagram_2[0].device).unsqueeze(0)  # [1, N, D]
+        entropy_features.append(entropy)
 
-        # Compute the Chamfer distance for the current part
-        loss_chamfer, _ = chamfer_distance(pd1, pd2)
-        total_loss += loss_chamfer
+    return torch.stack(entropy_features).unsqueeze(-1)  # Shape: (n_dimensions, 1)
 
-    return total_loss
+
+def normalize_diagram(diagram, max_death_cap=1e6):
+    """
+    Min-max normalize a persistence diagram's (birth, death) coordinates, handling inf values.
+    Args:
+        diagram: torch.Tensor of shape (N, 3) with [birth, death, dimension]
+        max_death_cap: Finite value to replace inf death times
+    Returns:
+        torch.Tensor: Normalized tensor with (birth, death) in [0, 1], dimension unchanged
+    """
+    bd = diagram[:, :2]
+    bd = torch.where(torch.isinf(bd), torch.tensor(max_death_cap, device=bd.device), bd)
+    finite_mask = torch.isfinite(bd)
+    if finite_mask.any():
+        min_val = torch.min(bd[finite_mask])
+        max_val = torch.max(bd[finite_mask])
+        normalized_bd = (bd - min_val) / (max_val - min_val + 1e-8)
+    else:
+        normalized_bd = bd
+    normalized_diagram = torch.cat([normalized_bd, diagram[:, 2:3]], dim=1)
+    return normalized_diagram
+
+
+def compute_chamfer_loss(persistence_diagram_1, persistence_diagram_2, dimensions=[0, 1, 2]):
+    """
+    Compute differentiable Chamfer loss on persistence entropy features across homology dimensions.
+    Args:
+        persistence_diagram_1: NumPy array of shape (n_features, 3) with [birth, death, dim]
+        persistence_diagram_2: NumPy array of shape (n_features, 3) with [birth, death, dim]
+        dimensions: List of homology dimensions to compute loss for
+    Returns:
+        torch.Tensor: Chamfer loss on entropy features
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    pd1 = torch.from_numpy(persistence_diagram_1).float().to(device)
+    pd2 = torch.from_numpy(persistence_diagram_2).float().to(device)
+
+    pd1 = normalize_diagram(pd1)
+    pd2 = normalize_diagram(pd2)
+
+    # Compute entropy features
+    entropy1 = compute_persistence_entropy(pd1, dimensions, device)
+    entropy2 = compute_persistence_entropy(pd2, dimensions, device)
+
+    # Treat entropy features as points for Chamfer loss
+    points1 = entropy1.unsqueeze(0)  # Shape: [1, n_dimensions, 1]
+    points2 = entropy2.unsqueeze(0)  # Shape: [1, n_dimensions, 1]
+
+    if torch.any(torch.isnan(points1)) or torch.any(torch.isinf(points1)) or \
+       torch.any(torch.isnan(points2)) or torch.any(torch.isinf(points2)):
+        # logger.warning("NaN or inf in entropy features; returning 0 loss")
+        return torch.tensor(0.0, device=device, requires_grad=False)
+
+    loss_chamfer, _ = chamfer_distance(points1, points2)
+    if torch.isnan(loss_chamfer) or torch.isinf(loss_chamfer):
+        # logger.warning("Chamfer loss is NaN or inf; returning 0 loss")
+        return torch.tensor(0.0, device=device, requires_grad=False)
+
+    # logger.info(f"Chamfer Loss on entropy features: {loss_chamfer.item():.4f}")
+    return loss_chamfer
 
 
 def compute_chamfer_loss_no_topo(y_pred, y_true):
@@ -245,54 +312,44 @@ def compute_chamfer_loss_no_topo(y_pred, y_true):
     return loss_chamfer
 
 
-def normalize_diagram(diagram):
-    """
-    Min-max normalize a persistence diagram.
-
-    Args:
-        diagram (torch.Tensor): Tensor of shape (N, 2) with [birth, death] pairs.
-    Returns:
-        Tensor: Normalized tensor with values in [0, 1].
-    """
-    min_val = torch.min(diagram)
-    max_val = torch.max(diagram)
-    normalized_diagram = (diagram - min_val) / (max_val - min_val + 1e-8)
-    return normalized_diagram
-
-
-def compute_ph_sparse_knn(features, k_neighbors=50):
+def compute_ph_sparse_knn(features, k_neighbors=50, logger=None,
+                          vectorRips_metric="precomputed",
+                          knn_metric="euclidean"):
     """
     Compute Persistent Homology using a sparse k-NN distance matrix.
     Args:
-        features: torch.Tensor or np.ndarray, shape [n_points, n_features]
-        k_neighbors: Number of nearest neighbors for sparse approximation
+        :param knn_metric: "euclidean", "cosine", ...
+        :param features: torch.Tensor or np.ndarray, shape [n_points, n_features]
+        :param k_neighbors: Number of nearest neighbors for sparse approximation
+        :param logger: Loguru logger object
+        :param vectorRips_metric: "precomputed", "euclidean", "manhattan" or "cosine"
     Returns:
-        Persistence diagrams
+        diagrams: NumPy array of persistence diagrams, shape (n_features, 3)
+
     """
-    # Convert to numpy if torch tensor
     if isinstance(features, torch.Tensor):
+        if logger:
+            logger.info("Detaching tensor for giotto-tda compatibility")
         features = features.cpu().detach().numpy()
 
-    # Compute k-nearest neighbors
     n_points = features.shape[0]
-    nbrs = NearestNeighbors(n_neighbors=k_neighbors, metric="euclidean").fit(features)
+    if n_points < k_neighbors:
+        raise ValueError(f"n_points ({n_points}) must be >= k_neighbors ({k_neighbors})")
+
+    nbrs = NearestNeighbors(n_neighbors=k_neighbors, metric=knn_metric).fit(features)
     distances, indices = nbrs.kneighbors(features)
 
-    # Create sparse distance matrix
     row = np.repeat(np.arange(n_points), k_neighbors)
     col = indices.flatten()
     data = distances.flatten()
     sparse_dist = csr_matrix((data, (row, col)), shape=(n_points, n_points))
-
-    # Ensure sparse matrix is symmetric (required for distance matrix)
     sparse_dist = sparse_dist.maximum(sparse_dist.T)
 
-    # Wrap in a list to match giotto-tda input format
     sparse_dist_list = [sparse_dist]
-
-    # Compute persistent homology
-    ph = VietorisRipsPersistence(metric="precomputed", homology_dimensions=[0, 1, 2])
-    diagrams = ph.fit_transform(sparse_dist_list)
+    ph = VietorisRipsPersistence(metric=vectorRips_metric, homology_dimensions=[0, 1, 2])
+    diagrams = ph.fit_transform(sparse_dist_list)[0]  # Shape: (n_features, 3)
+    if logger:
+        logger.info(f"Computed PH diagrams with {diagrams.shape[0]} features")
     return diagrams
 
 
@@ -352,7 +409,7 @@ def main(use_gradient_guided=False, use_persistent_homology=False, normalize_gkd
     # )
 
     # Loss scaling parameters
-    lambda_param = 10.0  # For GKD loss (increased to address small loss)
+    lambda_param = 10.0  # For GKD loss --> amplify the importance features
     beta_param = 0.3  # For persistent homology (Chamfer) loss
     gamma_param = 0.3  # For KLD loss
 
@@ -415,8 +472,8 @@ def main(use_gradient_guided=False, use_persistent_homology=False, normalize_gkd
                 M_student = gradient_guided_features(student_loss, student_latent_feature, normalize=normalize_gkd,
                                                      norm_type=norm_type)
                 gkd_loss = F.smooth_l1_loss(M_student, M_teacher, beta=1.0)
-                print(f"Correlation: {torch.corrcoef(torch.stack([M_teacher, M_student]))[0, 1].item()}")
-                print(f"Mean abs diff: {torch.mean(torch.abs(M_teacher - M_student)).item()}")
+                # print(f"Correlation: {torch.corrcoef(torch.stack([M_teacher, M_student]))[0, 1].item()}")
+                # print(f"Mean abs diff: {torch.mean(torch.abs(M_teacher - M_student)).item()}")
 
             # Persistent homology loss (Chamfer on TDA features)
             # Chamfer loss between teacher and student latent features
@@ -426,9 +483,14 @@ def main(use_gradient_guided=False, use_persistent_homology=False, normalize_gkd
             # Now changed to gtda package
             # Use Knn to select representative points
             if use_persistent_homology:
-                TDA_features_teacher = compute_ph_sparse_knn(teacher_latent_feature.feat)
-                TDA_features_student = compute_ph_sparse_knn(student_latent_feature.feat)
-                chamfer_loss = compute_chamfer_loss(TDA_features_teacher, TDA_features_student)
+                TDA_features_teacher = compute_ph_sparse_knn(teacher_latent_feature.feat, k_neighbors=50,
+                                                             vectorRips_metric="precomputed",
+                                                             knn_metric="euclidean")
+                TDA_features_student = compute_ph_sparse_knn(student_latent_feature.feat, k_neighbors=50,
+                                                             vectorRips_metric="precomputed",
+                                                             knn_metric="euclidean")
+
+                chamfer_loss = compute_chamfer_loss(TDA_features_teacher, TDA_features_student, dimensions=[0, 1, 2])
 
             # KLD loss
             kld_loss = kld_loss_fn(

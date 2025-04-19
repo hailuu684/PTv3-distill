@@ -4,6 +4,7 @@ from dataloader import PTv3_Dataloader
 from main import get_student_model, load_weights_ptv3_nucscenes_seg, get_teacher_model
 from gpu_main import get_teacher_model as distill_teacher_model
 from gpu_main import get_student_model as distill_student_model
+from pytorch3d.loss import chamfer_distance
 import torch
 import torch.nn.functional as F
 import time
@@ -13,7 +14,7 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.sparse import csr_matrix
 import numpy as np
 from pointcept.models.losses import build_criteria
-from gpu_main import compute_chamfer_loss_no_topo
+# from gpu_main import compute_chamfer_loss
 
 
 def get_grid_size(size=0.05):
@@ -31,7 +32,6 @@ def get_grid_size(size=0.05):
 
 
 def get_sample_data():
-
     CONFIG_FILE_STUDENT = "configs/nuscenes/semseg-pt-v3m1-0-train-student.py"
     PRETRAINED_PATH_STUDENT = './checkpoints/checkpoint_batch_40001.pth'
 
@@ -149,7 +149,6 @@ def get_sample_data():
 
 
 def get_pred_time_inference(model, input_dict, model_type='teacher'):
-
     pred_start = time.time()
     seg_logits = model(input_dict)  # --> 16Gb VRAM is not enough if not splitting into chunks
     pred_end_time = time.time() - pred_start
@@ -187,65 +186,138 @@ def compute_ph(features):
     return diagrams
 
 
-def compute_ph_sparse_knn(features, k_neighbors=50):
+def compute_ph_sparse_knn(features, k_neighbors=50, logger=None):
     """
     Compute Persistent Homology using a sparse k-NN distance matrix.
     Args:
         features: torch.Tensor or np.ndarray, shape [n_points, n_features]
         k_neighbors: Number of nearest neighbors for sparse approximation
+        logger: Loguru logger object
     Returns:
-        Persistence diagrams
+        diagrams: NumPy array of persistence diagrams, shape (n_features, 3)
     """
-    # Convert to numpy if torch tensor
     if isinstance(features, torch.Tensor):
+        if logger:
+            logger.info("Detaching tensor for giotto-tda compatibility")
         features = features.cpu().detach().numpy()
 
-    # Compute k-nearest neighbors
     n_points = features.shape[0]
+    if n_points < k_neighbors:
+        raise ValueError(f"n_points ({n_points}) must be >= k_neighbors ({k_neighbors})")
+
     nbrs = NearestNeighbors(n_neighbors=k_neighbors, metric="euclidean").fit(features)
     distances, indices = nbrs.kneighbors(features)
 
-    # Create sparse distance matrix
     row = np.repeat(np.arange(n_points), k_neighbors)
     col = indices.flatten()
     data = distances.flatten()
     sparse_dist = csr_matrix((data, (row, col)), shape=(n_points, n_points))
-
-    # Ensure sparse matrix is symmetric (required for distance matrix)
     sparse_dist = sparse_dist.maximum(sparse_dist.T)
 
-    # Wrap in a list to match giotto-tda input format
     sparse_dist_list = [sparse_dist]
-
-    # Compute persistent homology
-    ph = VietorisRipsPersistence(metric="precomputed", homology_dimensions=[0, 1, 2])
-    diagrams = ph.fit_transform(sparse_dist_list)
+    ph = VietorisRipsPersistence(metric="precomputed", homology_dimensions=[0, 1, 2],
+                                 reduced_homology=True)
+    diagrams = ph.fit_transform(sparse_dist_list)[0]  # Shape: (n_features, 3)
+    if logger:
+        logger.info(f"Computed PH diagrams with {diagrams.shape[0]} features")
     return diagrams
 
 
-def compute_ph_batched(features, batch_size=10000):
+def compute_persistence_entropy(diagram, dimensions=[0, 1, 2], device='cuda'):
     """
-    Compute Persistent Homology on batches of points.
+    Compute differentiable persistence entropy features for each homology dimension.
     Args:
-        features: torch.Tensor or np.ndarray, shape [n_points, n_features]
-        batch_size: Number of points per batch
+        diagram: torch.Tensor of shape (N, 3) with [birth, death, dimension]
+        dimensions: List of homology dimensions to compute entropy for
+        device: Device for computation
     Returns:
-        List of persistence diagrams
+        torch.Tensor: Entropy features of shape (n_dimensions, 1)
     """
-    if isinstance(features, torch.Tensor):
-        features = features.cpu().detach().numpy()
+    entropy_features = []
+    for dim in dimensions:
+        mask = diagram[:, 2] == dim
+        points = diagram[mask]
+        if points.shape[0] == 0:
+            entropy_features.append(torch.tensor(0.0, device=device))
+            continue
 
-    n_points = features.shape[0]
-    ph = VietorisRipsPersistence(metric="euclidean", homology_dimensions=[0, 1, 2])
-    diagrams = []
+        # Compute persistence (death - birth)
+        persistence = points[:, 1] - points[:, 0]  # Shape: (N,)
+        persistence = torch.clamp(persistence, min=0.0)  # Handle numerical errors
 
-    for i in range(0, n_points, batch_size):
-        batch = features[i:i + batch_size]
-        batch = batch.reshape(1, *batch.shape)
-        batch_diagrams = ph.fit_transform(batch)
-        diagrams.append(batch_diagrams[0])  # Store diagrams for each batch
+        # Normalize persistence to sum to 1 (like probabilities)
+        total_persistence = torch.sum(persistence)
+        if total_persistence > 0:
+            p = persistence / (total_persistence + 1e-8)
+            # Compute entropy: -sum(p * log(p))
+            entropy = -torch.sum(p * torch.log(p + 1e-8))
+        else:
+            entropy = torch.tensor(0.0, device=device)
 
-    return diagrams
+        entropy_features.append(entropy)
+
+    return torch.stack(entropy_features).unsqueeze(-1)  # Shape: (n_dimensions, 1)
+
+
+def normalize_diagram(diagram, max_death_cap=1e6):
+    """
+    Min-max normalize a persistence diagram's (birth, death) coordinates, handling inf values.
+    Args:
+        diagram: torch.Tensor of shape (N, 3) with [birth, death, dimension]
+        max_death_cap: Finite value to replace inf death times
+    Returns:
+        torch.Tensor: Normalized tensor with (birth, death) in [0, 1], dimension unchanged
+    """
+    bd = diagram[:, :2]
+    bd = torch.where(torch.isinf(bd), torch.tensor(max_death_cap, device=bd.device), bd)
+    finite_mask = torch.isfinite(bd)
+    if finite_mask.any():
+        min_val = torch.min(bd[finite_mask])
+        max_val = torch.max(bd[finite_mask])
+        normalized_bd = (bd - min_val) / (max_val - min_val + 1e-8)
+    else:
+        normalized_bd = bd
+    normalized_diagram = torch.cat([normalized_bd, diagram[:, 2:3]], dim=1)
+    return normalized_diagram
+
+
+def compute_chamfer_loss(persistence_diagram_1, persistence_diagram_2, dimensions=[0, 1, 2]):
+    """
+    Compute differentiable Chamfer loss on persistence entropy features across homology dimensions.
+    Args:
+        persistence_diagram_1: NumPy array of shape (n_features, 3) with [birth, death, dim]
+        persistence_diagram_2: NumPy array of shape (n_features, 3) with [birth, death, dim]
+        dimensions: List of homology dimensions to compute loss for
+    Returns:
+        torch.Tensor: Chamfer loss on entropy features
+    """
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    pd1 = torch.from_numpy(persistence_diagram_1).float().to(device)
+    pd2 = torch.from_numpy(persistence_diagram_2).float().to(device)
+
+    pd1 = normalize_diagram(pd1)
+    pd2 = normalize_diagram(pd2)
+
+    # Compute entropy features
+    entropy1 = compute_persistence_entropy(pd1, dimensions, device)
+    entropy2 = compute_persistence_entropy(pd2, dimensions, device)
+
+    # Treat entropy features as points for Chamfer loss
+    points1 = entropy1.unsqueeze(0)  # Shape: [1, n_dimensions, 1]
+    points2 = entropy2.unsqueeze(0)  # Shape: [1, n_dimensions, 1]
+
+    if torch.any(torch.isnan(points1)) or torch.any(torch.isinf(points1)) or \
+       torch.any(torch.isnan(points2)) or torch.any(torch.isinf(points2)):
+        # logger.warning("NaN or inf in entropy features; returning 0 loss")
+        return torch.tensor(0.0, device=device, requires_grad=False)
+
+    loss_chamfer, _ = chamfer_distance(points1, points2)
+    if torch.isnan(loss_chamfer) or torch.isinf(loss_chamfer):
+        # logger.warning("Chamfer loss is NaN or inf; returning 0 loss")
+        return torch.tensor(0.0, device=device, requires_grad=False)
+
+    # logger.info(f"Chamfer Loss on entropy features: {loss_chamfer.item():.4f}")
+    return loss_chamfer
 
 
 def test_topo_new_function():
@@ -289,7 +361,7 @@ def test_topo_new_function():
     student_model.train()
     for batch_ndx, input_dict in enumerate(train_loader):
 
-        if batch_ndx == 10:
+        if batch_ndx == 1:
             break
 
         # Move all input tensors to the correct device
@@ -298,7 +370,8 @@ def test_topo_new_function():
         # for param in teacher_model.parameters():
         #     param.requires_grad = True
 
-        teacher_seg_logits, teacher_latent_feature = teacher_model(input_dict)  # teacher_latent_feature (N, 512) --> for homology, not this
+        teacher_seg_logits, teacher_latent_feature = teacher_model(
+            input_dict)  # teacher_latent_feature (N, 512) --> for homology, not this
 
         student_seg_logits, student_latent_feature = student_model(input_dict)  # student_latent_feature (N, 512)
 
@@ -318,27 +391,31 @@ def test_topo_new_function():
         # Compute Smooth L1 loss (replacing L1 loss)
         gkd_loss = F.smooth_l1_loss(M_student, M_teacher, beta=1.0)  # beta controls smoothness
 
+        # Use Knn to select representative points
+        teacher_TDA_features = compute_ph_sparse_knn(teacher_latent_feature.feat, k_neighbors=50)
+        student_TDA_features = compute_ph_sparse_knn(student_latent_feature.feat, k_neighbors=50)
+        # print(teacher_TDA_features)
+        chamfer_loss = compute_chamfer_loss(teacher_TDA_features, student_TDA_features, dimensions=[0, 1, 2])
+
+        # # Compute PH based on batch | takes too much time --> don't recommend this
+        # TDA_features = compute_ph_batched(feat_enc.feat, batch_size=5000)
+
         # Total loss
-        total_loss = student_loss + gkd_loss
+        total_loss = student_loss + gkd_loss + chamfer_loss
 
         # Backward pass for student model
         student_optimizer.zero_grad()
         total_loss.backward()
         student_optimizer.step()
 
-        print(f"Batch {batch_ndx}, GKD Loss: {gkd_loss.item()}, Total Loss: {total_loss.item()}")
+        print(f"Batch {batch_ndx}, "
+              f"GKD Loss: {gkd_loss.item():.4f}, "
+              f"Chamfer Loss: {chamfer_loss.item():.4f}, "
+              f"Total Loss: {total_loss.item():.4f}")
 
         # Explicitly clear teacher-related tensors to free memory
-        del teacher_loss, teacher_seg_logits, teacher_latent_feature, M_teacher
+        del teacher_loss, teacher_seg_logits, teacher_latent_feature, M_teacher, teacher_TDA_features
         torch.cuda.empty_cache()  # Clear GPU memory cache (use cautiously)
-
-        # Use Knn to select representative points
-        # TDA_features = compute_ph_sparse_knn(feat_enc.feat)
-
-        # # Compute PH based on batch | takes too much time --> don't recommend this
-        # TDA_features = compute_ph_batched(feat_enc.feat, batch_size=5000)
-
-        # print(TDA_features)
 
         # for param in teacher_model.parameters():
         #     param.requires_grad = False
@@ -349,7 +426,6 @@ def test_topo_new_function():
 
 
 def gradient_guided_features(output_loss, enc_feature):
-
     # enc_feature.feat.retain_grad()
 
     # 1. Get gradients of loss w.r.t. point-wise features
@@ -374,6 +450,5 @@ def gradient_guided_features(output_loss, enc_feature):
 
 
 if __name__ == "__main__":
-
     test_topo_new_function()
     # get_grid_size(size=0.1)
