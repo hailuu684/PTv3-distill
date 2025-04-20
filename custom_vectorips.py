@@ -11,11 +11,53 @@ except ImportError:
     KNN_AVAILABLE = False
 
 
+def optimized_cdist(x, y=None, chunk_size=None):
+    """
+    Compute squared Euclidean distance matrix between x (n×d) and y (m×d) or x (n×d) if y is None.
+
+    Args:
+        x (torch.Tensor): Input tensor of shape (n, d).
+        y (torch.Tensor, optional): Input tensor of shape (m, d). Defaults to x.
+        chunk_size (int, optional): Number of rows of x to process at a time. Defaults to None (process all).
+
+    Returns:
+        torch.Tensor: Distance matrix of shape (n, m) where dist[i,j] = ||x[i,:] - y[j,:]||^2.
+    """
+    if y is None:
+        y = x
+    n, d = x.shape
+    m = y.shape[0]
+
+    # Compute norms: ||x[i,:]||^2 and ||y[j,:]||^2
+    x_norm = torch.sum(x ** 2, dim=1, keepdim=True)  # Shape: (n, 1)
+    y_norm = torch.sum(y ** 2, dim=1, keepdim=True).t()  # Shape: (1, m)
+
+    if chunk_size is None or chunk_size >= n:
+        # Compute -2 * x @ y^T
+        xy = -2.0 * torch.mm(x, y.t())  # Shape: (n, m)
+        # Compute distances: x_norm + y_norm - 2 * x @ y^T
+        dist = x_norm + y_norm + xy
+        # Clamp to avoid numerical errors
+        dist = torch.clamp(dist, min=0.0)
+        return dist
+    else:
+        # Process in chunks to reduce memory usage
+        dist = torch.zeros(n, m, device=x.device, dtype=x.dtype)
+        for i in range(0, n, chunk_size):
+            end_i = min(i + chunk_size, n)
+            x_chunk = x[i:end_i]  # Shape: (chunk_size, d)
+            x_chunk_norm = x_norm[i:end_i]  # Shape: (chunk_size, 1)
+            xy_chunk = -2.0 * torch.mm(x_chunk, y.t())  # Shape: (chunk_size, m)
+            dist[i:end_i] = x_chunk_norm + y_norm + xy_chunk
+        dist = torch.clamp(dist, min=0.0)
+        return dist
+
+
 class DifferentiableVietorisRipsPersistence:
     def __init__(self, homology_dimensions=[0, 1], max_edge_length=2.0,
                  max_edges=100000, max_cycles=100,
                  use_knn=False, knn_neighbors=20,
-                 auto_config=False):
+                 auto_config=False, distance_method="optimized_cdist"):
 
         self.homology_dimensions = homology_dimensions
         self.max_edge_length = max_edge_length
@@ -28,6 +70,9 @@ class DifferentiableVietorisRipsPersistence:
             print("Warning: torch-cluster not available, falling back to non-kNN method.")
 
         self.auto_config = auto_config
+
+        # Accelerate matrix calculation
+        self.distance_method = distance_method if distance_method in ["cdist", "optimized_cdist"] else "cdist"
 
     def auto_configure(self, points):
         """
@@ -101,57 +146,67 @@ class DifferentiableVietorisRipsPersistence:
         else:
             # Full distance matrix version with dynamic chunking
             max_chunk_size = 10000  # Maximum chunk size for large point clouds
-            chunk_size = min(n_points, max_chunk_size)  # Use full size for small clouds
+            chunk_size = min(n_points, max_chunk_size)
             edge_dists = []
             edge_pairs = []
+            chunk_count = 0
             for i in range(0, n_points, chunk_size):
                 points_i = points[i:i + chunk_size]
-                dist = torch.cdist(points_i, points, p=2)  # Shape: (chunk_size, n_points)
-                # Mask upper triangle (i < j) to avoid duplicates
-                mask = (dist <= self.max_edge_length) & (
-                torch.ones_like(dist, dtype=torch.bool).triu(diagonal=1)[:dist.shape[0], :])
-                chunk_dists = dist[mask]
-                row, col = torch.where(mask)
-                row = row + i  # Adjust row indices for chunk offset
-                chunk_pairs = torch.stack([row, col], dim=1)
-                edge_dists.append(chunk_dists)
-                edge_pairs.append(chunk_pairs)
+
+                if self.distance_method == "optimized_cdist":
+                    dist = optimized_cdist(points_i, points, chunk_size=chunk_size)
+                else:
+                    dist = torch.cdist(points_i, points, p=2)  # Shape: (chunk_size, n_points)
+
+                mask = dist <= self.max_edge_length
+                if mask.any():
+                    mask = mask & (torch.ones_like(dist, dtype=torch.bool).triu(diagonal=1)[:dist.shape[0], :])
+                    chunk_dists = dist[mask]
+                    row, col = torch.where(mask)
+                    row = row + i
+                    chunk_pairs = torch.stack([row, col], dim=1)
+                    edge_dists.append(chunk_dists)
+                    edge_pairs.append(chunk_pairs)
+                chunk_count += 1
+            print(f"Processed {chunk_count} chunks")
             edge_dists = torch.cat(edge_dists) if edge_dists else torch.tensor([], device=self.device)
             edge_pairs = torch.cat(edge_pairs) if edge_pairs else torch.tensor([], device=self.device, dtype=torch.long)
+            # self.max_edges = max_edges
             return edge_dists, edge_pairs
 
+
     def _approximate_dim0(self, edge_dists, edge_pairs):
-        n_points = edge_pairs.max().item() + 1 if edge_pairs.numel() > 0 else 0
-        if n_points == 0:
-            return torch.tensor([], device=self.device).reshape(0, 3)
-        births = torch.zeros(n_points, device=self.device)
-        if edge_dists.numel() == 0:
-            return torch.tensor([[0.0, 0.0, 0.0] for _ in range(n_points)], device=self.device)
-        edge_weights = torch.softmax(-edge_dists, dim=0)
-        sorted_indices = torch.argsort(edge_dists)
-        sorted_indices = sorted_indices[:self.max_edges]
-        component = torch.arange(n_points, device=self.device, dtype=torch.long)
-        deaths = []
-        for idx in sorted_indices:
-            i, j = edge_pairs[idx]
-            dist = edge_dists[idx]
-            if component[i] != component[j]:
-                new_comp = torch.min(component[i], component[j])
-                old_comp_i = component[i]
-                old_comp_j = component[j]
-                new_component = component.clone()
-                new_component[component == old_comp_i] = new_comp
-                new_component[component == old_comp_j] = new_comp
-                component = new_component
-                deaths.append(dist)
-        if not deaths:
-            return torch.tensor([], device=self.device).reshape(0, 3)
-        deaths = torch.stack(deaths)
-        births = torch.zeros_like(deaths)
-        dims = torch.zeros_like(deaths)
-        diagram = torch.stack([births, deaths, dims], dim=1)
-        diagram = diagram[diagram[:, 1] > diagram[:, 0]]
-        return diagram
+            n_points = edge_pairs.max().item() + 1 if edge_pairs.numel() > 0 else 0
+            if n_points == 0:
+                return torch.tensor([], device=self.device).reshape(0, 3)
+            births = torch.zeros(n_points, device=self.device)
+            if edge_dists.numel() == 0:
+                return torch.tensor([[0.0, 0.0, 0.0] for _ in range(n_points)], device=self.device)
+            edge_weights = torch.softmax(-edge_dists, dim=0)
+            sorted_indices = torch.argsort(edge_dists)
+            sorted_indices = sorted_indices[:self.max_edges]
+            component = torch.arange(n_points, device=self.device, dtype=torch.long)
+            deaths = []
+            for idx in sorted_indices:
+                i, j = edge_pairs[idx]
+                dist = edge_dists[idx]
+                if component[i] != component[j]:
+                    new_comp = torch.min(component[i], component[j])
+                    old_comp_i = component[i]
+                    old_comp_j = component[j]
+                    new_component = component.clone()
+                    new_component[component == old_comp_i] = new_comp
+                    new_component[component == old_comp_j] = new_comp
+                    component = new_component
+                    deaths.append(dist)
+            if not deaths:
+                return torch.tensor([], device=self.device).reshape(0, 3)
+            deaths = torch.stack(deaths)
+            births = torch.zeros_like(deaths)
+            dims = torch.zeros_like(deaths)
+            diagram = torch.stack([births, deaths, dims], dim=1)
+            diagram = diagram[diagram[:, 1] > diagram[:, 0]]
+            return diagram
 
     def _approximate_dim1(self, edge_dists, edge_pairs):
         n_points = edge_pairs.max().item() + 1 if edge_pairs.numel() > 0 else 0
@@ -379,7 +434,7 @@ def test_on_simple_model():
             self.fc = nn.Linear(2, 2)
             self.vr = DifferentiableVietorisRipsPersistence(homology_dimensions=[0, 1, 2], max_edge_length=2.0,
                                                             max_edges=200, use_knn=False, knn_neighbors=20,
-                                                            auto_config=True)
+                                                            auto_config=True, distance_method="optimized_cdist") # dist_matrix, cdist
 
         def forward(self, points):
             points = self.fc(points)
@@ -417,7 +472,7 @@ def test_on_simple_model():
 
     # Normalize input to unit scale
     # Generate large point cloud
-    points = generate_large_circle(n_points=100, radius=1.0, noise=0.05).to(device)
+    points = generate_large_circle(n_points=10000, radius=1.0, noise=0.05).to(device)
 
     # Prepare input
     points = points.unsqueeze(0).requires_grad_(True)  # Shape: (1, n_subsample, 2)
@@ -440,3 +495,6 @@ if __name__ == "__main__":
     unittest.main(argv=[''], exit=False)
 
     # test_on_simple_model()
+
+    #todo: add function to calculate persistent entropy
+    #todo: check the function of persistent entropy calculation in torch if equals to the one in package
