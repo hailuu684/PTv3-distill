@@ -446,9 +446,8 @@ def test_on_simple_model():
                     print(f"Diagram {i} dim0 features: {(diagram[:, 2] == 0).sum().item()}")
                     print(f"Diagram {i} dim1 features: {(diagram[:, 2] == 1).sum().item()}")
                     print(f"Diagram {i} sample: {diagram[:5]}")
-                feature = diagram[:, 0].sum() + diagram[:, 1].sum() if diagram.shape[0] > 0 else torch.tensor(0.0,
-                                                                                                              device=points.device,
-                                                                                                              requires_grad=True)
+                feature = diagram[:, 0].sum() + diagram[:, 1].sum() \
+                    if diagram.shape[0] > 0 else torch.tensor(0.0, device=points.device, requires_grad=True)
                 batch_features.append(feature)
             output = torch.stack(batch_features)
             print(f"Output: {output}")
