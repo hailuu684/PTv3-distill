@@ -30,6 +30,7 @@ from pointcept.models.utils.structure import Point
 import pointcept.utils.comm as comm
 from pointcept.models.modules import PointModule, PointSequential
 from spconv.pytorch import SparseConvTensor
+# import copy
 
 
 class RPE(torch.nn.Module):
@@ -565,7 +566,7 @@ class PointTransformerV3(PointModule):
         self.order = [order] if isinstance(order, str) else order
         self.cls_mode = cls_mode
         self.shuffle_orders = shuffle_orders
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        # self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         assert self.num_stages == len(stride) + 1
         assert self.num_stages == len(enc_depths)
@@ -602,10 +603,10 @@ class PointTransformerV3(PointModule):
             ln_layer = nn.LayerNorm
         # activation layers
         act_layer = nn.GELU
-
-        self.conditions = pdnorm_conditions
-        self.embedding_table = nn.Embedding(len(pdnorm_conditions), context_channels)
-        self.seg_head = nn.Linear(backbone_out_channels, num_classes)
+        ### we dont need the following codes
+        # self.conditions = pdnorm_conditions
+        # self.embedding_table = nn.Embedding(len(pdnorm_conditions), context_channels)
+        # self.seg_head = nn.Linear(backbone_out_channels, num_classes)
 
         self.embedding = Embedding(
             in_channels=in_channels,
@@ -718,24 +719,26 @@ class PointTransformerV3(PointModule):
         # )
         #
         # data_dict["context"] = context # --> might be helpful here
+        # print('ptv3 main class')
+        # print(data_dict)
 
         point = Point(data_dict)
 
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
-        # ✅ Move all tensors inside `Point` to CUDA
-        for key, value in point.items():
-            if isinstance(value, torch.Tensor):
-                point[key] = value.cuda()
-            elif isinstance(value, spconv.SparseConvTensor):
-                # Move SparseConvTensor components to CUDA
-                point[key] = spconv.SparseConvTensor(
-                    features=value.features.cuda(),
-                    indices=value.indices.cuda(),
-                    spatial_shape=value.spatial_shape,
-                    batch_size=value.batch_size
-                )
+        # # ✅ Move all tensors inside `Point` to CUDA
+        # for key, value in point.items():
+        #     if isinstance(value, torch.Tensor):
+        #         point[key] = value.cuda()
+        #     elif isinstance(value, spconv.SparseConvTensor):
+        #         # Move SparseConvTensor components to CUDA
+        #         point[key] = spconv.SparseConvTensor(
+        #             features=value.features.cuda(),
+        #             indices=value.indices.cuda(),
+        #             spatial_shape=value.spatial_shape,
+        #             batch_size=value.batch_size
+        #         )
 
         point = self.embedding(point)
         # print("Latent space after embedding:", point.feat.shape)
@@ -746,22 +749,40 @@ class PointTransformerV3(PointModule):
         # print("Final latent space before decoder:", point.feat.shape)
         # import numpy as np
         # np.save("./point_feat.npy", point.feat.cpu().detach().numpy())
+
+        # print("point.feat shape:", point.feat.shape)
+        # print("point.feat dtype:", point.feat.dtype)
+        # print("First 5 rows of point.feat (after detach):")
+        # print(point.feat.detach().cpu()[:5])
+        # feat_numpy = point.feat.detach().cpu().numpy()
+        # rotated_feat = np.rot90(feat_numpy)
+
+        # print("Original shape:", feat_numpy.shape)
+        # print("Rotated shape:", rotated_feat.shape)
         latent_space = np.rot90(point.feat.cpu().detach().numpy())
+        # latent_space = point.feat.cpu().detach().numpy()
         pe_latent_space = rpp_py.run("--format point-cloud --dim 2 --sparse", latent_space)
-        TDA_latent_feature = [torch.tensor(np.array(value.tolist())).to(self.device) for key, value in sorted(pe_latent_space.items())]
+        TDA_latent_feature = [torch.tensor(np.array(value.tolist())) for key, value in sorted(pe_latent_space.items())]
+
+        # print(TDA_latent_feature)
+        # print("Before dec:", point.feat[:5])
+        # TDA_latent_feature = point.feat.clone()
 
         if not self.cls_mode:
             point = self.dec(point)
+            # print("After dec:", point.feat[:5])
+        # ptv3 github commented out the following codes
         else:
             point.feat = segment_csr(
                 src=point.feat,
                 indptr=nn.functional.pad(point.offset, (1, 0)),
                 reduce="mean",
             )
+        # return point
 
-        seg_logits = self.seg_head(point.feat)
+        # seg_logits = self.seg_head(point.feat)
 
-        return seg_logits, TDA_latent_feature
+        return point, TDA_latent_feature
 
     def viz_persistent_homology(self, data_dict):
 
@@ -770,18 +791,18 @@ class PointTransformerV3(PointModule):
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
-        # ✅ Move all tensors inside `Point` to CUDA
-        for key, value in point.items():
-            if isinstance(value, torch.Tensor):
-                point[key] = value.cuda()
-            elif isinstance(value, spconv.SparseConvTensor):
-                # Move SparseConvTensor components to CUDA
-                point[key] = spconv.SparseConvTensor(
-                    features=value.features.cuda(),
-                    indices=value.indices.cuda(),
-                    spatial_shape=value.spatial_shape,
-                    batch_size=value.batch_size
-                )
+        # # ✅ Move all tensors inside `Point` to CUDA
+        # for key, value in point.items():
+        #     if isinstance(value, torch.Tensor):
+        #         point[key] = value.cuda()
+        #     elif isinstance(value, spconv.SparseConvTensor):
+        #         # Move SparseConvTensor components to CUDA
+        #         point[key] = spconv.SparseConvTensor(
+        #             features=value.features.cuda(),
+        #             indices=value.indices.cuda(),
+        #             spatial_shape=value.spatial_shape,
+        #             batch_size=value.batch_size
+        #         )
 
         point = self.embedding(point)
         # print("Latent space after embedding:", point.feat.shape)

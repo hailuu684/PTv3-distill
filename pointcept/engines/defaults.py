@@ -131,6 +131,8 @@ def default_config_parser(file_path, options):
 def default_setup(cfg):
     # scalar by world size
     world_size = comm.get_world_size()
+    # print("1111111111111111111111111111111111111111111111111111111111111world_size: ", world_size)
+    # print("batch_size_test: ", cfg.batch_size_test)
     cfg.num_worker = cfg.num_worker if cfg.num_worker is not None else mp.cpu_count()
     cfg.num_worker_per_gpu = cfg.num_worker // world_size
     assert cfg.batch_size % world_size == 0
@@ -140,9 +142,11 @@ def default_setup(cfg):
     cfg.batch_size_val_per_gpu = (
         cfg.batch_size_val // world_size if cfg.batch_size_val is not None else 1
     )
+    # print("1111111111111111111111111111111111111111111111111111111111111world_size: ", world_size)
     cfg.batch_size_test_per_gpu = (
         cfg.batch_size_test // world_size if cfg.batch_size_test is not None else 1
     )
+    print("batch_size_test_per_gpu: ", cfg.batch_size_test_per_gpu)
     # update data loop
     assert cfg.epoch % cfg.eval_epoch == 0
     # settle random seed

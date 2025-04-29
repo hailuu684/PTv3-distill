@@ -129,6 +129,11 @@ class DefaultDataset(Dataset):
     def prepare_train_data(self, idx):
         # load data
         data_dict = self.get_data(idx)
+        # seg = data_dict.get("segment", None)
+        # if seg is not None:
+        #     if np.any((seg < 0) | (seg >= 19)):  # 如果你有 19 类（0~18）
+        #         print(f"[BAD LABEL] index {idx} | name: {data_dict.get('name')} | "
+        #             f"min: {seg.min()}, max: {seg.max()}, unique: {np.unique(seg)}")
         data_dict = self.transform(data_dict)
         return data_dict
 
@@ -166,6 +171,7 @@ class DefaultDataset(Dataset):
         return result_dict
 
     def __getitem__(self, idx):
+        # print("111111111111111111111111111111111111111",idx)
         if self.test_mode:
             return self.prepare_test_data(idx)
         else:

@@ -1,10 +1,11 @@
 _base_ = ["../_base_/default_runtime.py"]
 
 # misc custom setting
-batch_size = 9  # bs: total bs in all gpus
+batch_size = 36  # bs: total bs in all gpus
 mix_prob = 0.8
 empty_cache = False
 enable_amp = True
+batch_size_test = 4
 
 # model settings
 model = dict(
@@ -16,13 +17,21 @@ model = dict(
         in_channels=4,
         order=["z", "z-trans", "hilbert", "hilbert-trans"],
         stride=(2, 2, 2, 2),
-        enc_depths=(2, 2, 2, 6, 2),
-        enc_channels=(32, 64, 128, 256, 512),
-        enc_num_head=(2, 4, 8, 16, 32),
-        enc_patch_size=(1024, 1024, 1024, 1024, 1024),
-        dec_depths=(2, 2, 2, 2),
-        dec_channels=(64, 64, 128, 256),
-        dec_num_head=(4, 4, 8, 16),
+        # enc_depths=(2, 2, 2, 6, 2),
+        # enc_channels=(32, 64, 128, 256, 512),
+        # enc_num_head=(2, 4, 8, 16, 32),
+        # enc_patch_size=(1024, 1024, 1024, 1024, 1024),
+        # dec_depths=(2, 2, 2, 2),
+        # dec_channels=(64, 64, 128, 256),
+        # dec_num_head=(4, 4, 8, 16),
+        enc_depths=(1, 1, 1, 2, 1),  # 20% of the teacher's depths
+        enc_channels=(16, 16, 32, 64, 128),  # Reduced channels
+        enc_num_head=(1, 1, 2, 4, 8),  # Reduced number of attention heads
+        enc_patch_size=(1024, 1024, 1024, 1024, 1024),  # (1024, 1024, 1024, 1024, 1024)
+        dec_depths=(1, 1, 1, 1),  # Reduced decoder depths
+        dec_channels=(64, 64, 128, 128),
+        dec_num_head=(2, 2, 4, 8),  # Reduced decoder attention heads
+
         dec_patch_size=(1024, 1024, 1024, 1024),
         mlp_ratio=4,
         qkv_bias=True,
@@ -51,18 +60,21 @@ model = dict(
 )
 
 # scheduler settings
-epoch = 50
-eval_epoch = 50
-optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
+# epoch = 50
+# eval_epoch = 50
+# optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
+epoch = 60
+eval_epoch = 60
+optimizer = dict(type="AdamW", lr=0.006, weight_decay=0.005)
 scheduler = dict(
     type="OneCycleLR",
-    max_lr=[0.002, 0.0002],
+    max_lr=[0.006, 0.0006],
     pct_start=0.04,
     anneal_strategy="cos",
     div_factor=10.0,
     final_div_factor=100.0,
 )
-param_dicts = [dict(keyword="block", lr=0.0002)]
+param_dicts = [dict(keyword="block", lr=0.0006)]
 
 # dataset settings
 dataset_type = "WaymoDataset"
@@ -127,7 +139,7 @@ data = dict(
             # dict(type="ElasticDistortion", distortion_params=[[0.2, 0.4], [0.8, 1.6]]),
             dict(
                 type="GridSample",
-                grid_size=0.05,
+                grid_size=0.1,
                 hash_type="fnv",
                 mode="train",
                 keys=("coord", "strength", "segment"),

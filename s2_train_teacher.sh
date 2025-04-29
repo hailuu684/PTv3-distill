@@ -5,7 +5,7 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=2
 #SBATCH --gpus-per-node=2
-#SBATCH --mem=128G
+#SBATCH --mem=256G
 #SBATCH --partition=amperenodes-medium
 #SBATCH --time=48:00:00
 #SBATCH --output=terminal_logs/result_%j.txt

@@ -1,17 +1,17 @@
 weight = None
-resume = False
+resume = True
 evaluate = True
 test_only = False
 seed = 28024989
-save_path = 'exp/dataset_type/kitti/semseg-pt-v3m1-0-train-teacher'
+save_path = 'exp/dataset_type/kitti/kitti-train-teacher'
 miou_result_path = f"/home/dingz@bgsu.edu/ptv3/ptv3_distill/PTv3-distill/{save_path}/miou_result"
 
 # num_worker = 2 #run on muti gpu
 # batch_size = 24  # takes 79 Gb RAMs on A100
 # batch_size_val = 24
-num_worker = 4 #run on muti gpu muti nodes
-batch_size = 48  # takes 79 Gb RAMs on A100
-batch_size_val = 48
+num_worker = 2 #run on muti gpu muti nodes
+batch_size = 24  # takes 79 Gb RAMs on A100
+batch_size_val = 24
 batch_size_test = None
 epoch = 50
 eval_epoch = 50
@@ -91,7 +91,12 @@ model = dict(
         ],
         loss_weight=1.0,
         ignore_index=-1,
-    )]
+    ),
+    dict(
+            type='LovaszLoss',
+            mode='multiclass',
+            loss_weight=1.0,
+            ignore_index=-1),]
 )
 
 

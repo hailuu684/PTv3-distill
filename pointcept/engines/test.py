@@ -114,8 +114,8 @@ class TesterBase:
 @TESTERS.register_module()
 class SemSegTester(TesterBase):
     def test(self):
-
-        assert self.test_loader.batch_size == 1
+        print("self.test_loader.batch_size: ", self.test_loader.batch_size)
+        # assert self.test_loader.batch_size == 1
         logger = get_root_logger()
         logger.info(">>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>")
 

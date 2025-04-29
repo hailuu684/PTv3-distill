@@ -1,10 +1,11 @@
 _base_ = ["../_base_/default_runtime.py"]
 
 # misc custom setting
-batch_size = 9  # bs: total bs in all gpus
+batch_size = 36  # bs: total bs in all gpus
 mix_prob = 0.8
 empty_cache = False
 enable_amp = True
+batch_size_test = 1
 
 # model settings
 model = dict(
@@ -51,18 +52,21 @@ model = dict(
 )
 
 # scheduler settings
-epoch = 50
-eval_epoch = 50
-optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
+# epoch = 50
+# eval_epoch = 50
+# optimizer = dict(type="AdamW", lr=0.002, weight_decay=0.005)
+epoch = 90
+eval_epoch = 90
+optimizer = dict(type="AdamW", lr=0.006, weight_decay=0.005)
 scheduler = dict(
     type="OneCycleLR",
-    max_lr=[0.002, 0.0002],
+    max_lr=[0.006, 0.0006],
     pct_start=0.04,
     anneal_strategy="cos",
     div_factor=10.0,
     final_div_factor=100.0,
 )
-param_dicts = [dict(keyword="block", lr=0.0002)]
+param_dicts = [dict(keyword="block", lr=0.0006)]
 
 # dataset settings
 dataset_type = "WaymoDataset"

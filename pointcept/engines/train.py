@@ -83,6 +83,10 @@ class TrainerBase:
     def before_train(self):
         for h in self.hooks:
             h.before_train()
+        # the following code just was used just once for extra 30 epoches training after finished training 60 epoches.
+        # if self.cfg.resume:
+        #     self.logger.info("[Manual Override] Setting scheduler.total_steps = 59220")
+        #     self.scheduler.total_steps = 59220
 
     def before_epoch(self):
         for h in self.hooks:

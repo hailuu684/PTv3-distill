@@ -287,7 +287,8 @@ def handle_process(file_path, output_root, test_frame_list):
     data_group = tf.data.TFRecordDataset(file_path, compression_type="")
     for data in data_group:
         frame = open_dataset.Frame()
-        frame.ParseFromString(bytearray(data.numpy()))
+        # frame.ParseFromString(bytearray(data.numpy()))
+        frame.ParseFromString(bytes(data.numpy()))
         context_name = frame.context.name
         timestamp = str(frame.timestamp_micros)
 
